@@ -1,4 +1,3 @@
-import sqlite3
 import dspy
 import os
 import telebot #pip install pytelegrambotapi
@@ -6,47 +5,11 @@ import whisper #pip install -U openai-whisper
 ### whisper requires ffmpeg: on windows: choco install ffmpeg
 import json
 from dotenv import load_dotenv
+from server import initialize_db, get_schema, execute_query # import db functions from server.py
 
 load_dotenv()
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-db_path = os.path.join(BASE_DIR, "database/lojas.db")
-
-schemaDB = """
-CREATE TABLE produtos (
-    nome VARCHAR(50),
-    departmento VARCHAR(50),
-);
-"""
-
-def create_db():
-  conn = sqlite3.connect(db_path)
-  c = conn.cursor()
-
-  # Create tables
-  c.execute("""CREATE TABLE IF NOT EXISTS produtos (
-                nome TEXT, 
-                departamento TEXT
-            )""")
-
-  c.executemany("INSERT INTO produtos VALUES (?, ?)", [
-    ("sabonete", "higiene"),
-    ("agua", "bebidas"),
-    ("coca", "bebidas"),
-  ])
-
-  conn.commit()
-  conn.close()
-
-# Create DB only if needed
-if os.path.exists(db_path) != True:
-    os.mkdir("database")
-    create_db()
-
-# DB Connection Test: print all products on the terminal
-conn = sqlite3.connect(db_path)
-results = conn.execute("SELECT * from produtos").fetchall()
-print(results)
+initialize_db()
 
 # Note: if you downloaded the gemma model as a .gguf
 # you will need to add ".gguf" at the end of the AI name below
@@ -76,13 +39,11 @@ class ReliableSQLGenerator(dspy.Module):
 # Example question for Telegram = "qual o departamento do sabonete?"
 
 def generate(question):
-    
     generator = ReliableSQLGenerator()
-    sql = generator.forward(schemaDB, question)
-    print(sql)
-    conn = sqlite3.connect(db_path)
-    print(sql.sql_query)
-    results = conn.execute(sql.sql_query).fetchall()
+    schema_db = get_schema()
+    sql = generator.forward(schema_db, question)
+    print(f"{sql}\n{sql.sql_query}")
+    results = execute_query(sql.sql_query)
     return results
 
 # API TOKEN do bot, lido do arquivo .env (ver .env.example)
