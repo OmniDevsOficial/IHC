@@ -12,6 +12,13 @@ load_dotenv()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 db_path = os.path.join(BASE_DIR, "database/lojas.db")
 
+schemaDB = """
+CREATE TABLE produtos (
+    nome VARCHAR(50),
+    departmento VARCHAR(50),
+);
+"""
+
 def create_db():
   conn = sqlite3.connect(db_path)
   c = conn.cursor()
@@ -43,7 +50,7 @@ print(results)
 
 # Note: if you downloaded the gemma model as a .gguf
 # you will need to add ".gguf" at the end of the AI name below
-lm = dspy.LM('openai/gemma-4-E2B-it-IQ4_XS', api_base='http://localhost:1337/v1', api_key='not-needed')
+lm = dspy.LM('openai/gemma-4-E2B-it-IQ4_XS.gguf', api_base='http://localhost:1337/v1', api_key='not-needed')
 dspy.configure(lm=lm)
 
 class TextToSQL(dspy.Signature):
@@ -69,14 +76,9 @@ class ReliableSQLGenerator(dspy.Module):
 # Example question for Telegram = "qual o departamento do sabonete?"
 
 def generate(question):
-    schema = """
-    CREATE TABLE produtos (
-      nome VARCHAR(50),
-      departmento VARCHAR(50),
-    );
-    """
+    
     generator = ReliableSQLGenerator()
-    sql = generator.forward(schema, question)
+    sql = generator.forward(schemaDB, question)
     print(sql)
     conn = sqlite3.connect(db_path)
     print(sql.sql_query)
@@ -91,8 +93,8 @@ bot = telebot.TeleBot(API_TOKEN)
 
 @bot.message_handler(func=lambda message: True)
 def reply_hi(message):
-  result = generate(message.text)
-  bot.reply_to(message, json.dumps(result))
+  result = generate(message.text)               # raw SQL result transformed into raw JSON
+  bot.reply_to(message, json.dumps(result))     # sends the raw generated JSON back to Telegram
 
 @bot.message_handler(content_types=['voice'])
 def transcribe_voice_message(message):
@@ -103,8 +105,8 @@ def transcribe_voice_message(message):
     # Transcribe the audio using Whisper AI
     text = whisper_transcribe(file_path)
 
-    result = generate(text)
-    bot.reply_to(message, json.dumps(result))
+    result = generate(text)                     # raw SQL result transformed into raw JSON
+    bot.reply_to(message, json.dumps(result))   # sends the raw generated JSON back to Telegram
 
 def whisper_transcribe(filepath: str, model="tiny") -> str:
     """

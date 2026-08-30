@@ -1,3 +1,6 @@
+.venv
 venv
 database
 .env
+__pycache__
+docs
