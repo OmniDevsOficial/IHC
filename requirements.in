@@ -1,0 +1,27 @@
+# Dependências diretas do projeto.
+# Após editar este arquivo, rode:
+#   pip-compile --unsafe-package triton requirements.in   # gera o lock travado
+#   pip-sync requirements.txt                             # espelha o ambiente local
+#
+# O --unsafe-package triton é obrigatório: o openai-whisper declara o triton
+# como dependência só de Linux, e o pip-compile grava essa resolução sem o
+# marcador de plataforma, quebrando o pip-sync no Windows. O triton só serve
+# para o caminho CUDA do whisper, que nunca executa com torch CPU.
+
+# Índice de wheels CPU-only do PyTorch. Sem isso, o torch puxa ~20 pacotes
+# CUDA (triton, nvidia-*, cuda-toolkit) que não têm wheel para Windows e
+# quebram o pip-sync lá. As wheels +cpu não declaram nenhuma delas.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# API (server.py)
+fastapi
+uvicorn
+
+# Bot do Telegram (bot.py)
+pyTelegramBotAPI
+openai-whisper
+dspy
+torch
+
+# Configuração via .env
+python-dotenv
