@@ -12,9 +12,9 @@ load_dotenv()
 # URL do backend (server.py) rodando via uvicorn
 # uvicorn server:app --reload   -> sobe em http://127.0.0.1:8000
 SERVER_URL = os.getenv("SERVER_URL", "http://127.0.0.1:8000")
+LLM_MODEL = os.getenv("LLM_MODEL", "openai/gemma-4-E2B-it-IQ4_XS")
 
-
-lm = dspy.LM('openai/gemma-4-E2B-it-IQ4_XS', api_base='http://localhost:1337/v1', api_key='not-needed')
+lm = dspy.LM(LLM_MODEL, api_base='http://localhost:1337/v1', api_key='not-needed')
 dspy.configure(lm=lm)
 
 class TextToSQL(dspy.Signature):
@@ -56,7 +56,6 @@ class ReliableSQLGenerator(dspy.Module):
 # mantém sua própria cópia da descrição pra alimentar a IA)
 DB_SCHEMA = TextToSQL.__doc__
 
-
 def generate(question):
     generator = ReliableSQLGenerator()
     sql = generator(dbschema=DB_SCHEMA, question=question)
@@ -78,7 +77,6 @@ def execute_query_remota(sql: str):
         return dados.get("resultado", dados)
     except requests.exceptions.RequestException as e:
         return {"erro": f"Não foi possível consultar o servidor: {e}"}
-
 
 
 API_TOKEN = os.getenv("TELEGRAM_API_TOKEN")

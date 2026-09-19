@@ -1,16 +1,4 @@
-"""
-server.py — Backend do projeto IHC (Text-to-SQL via Telegram)
-
-Responsabilidade deste arquivo:
-- Modelar e manter o banco de dados SQLite (estrutura de um mercado)
-- Expor uma rota HTTP GET que recebe o SQL já gerado pela IA (em bot.py)
-  e devolve o resultado da consulta em JSON
-
-bot.py NÃO importa as funções daqui diretamente — ele faz uma
-requisição HTTP GET pra este servidor (por isso o comentário original
-"estrutura velha da empresa": aqui simula um backend legado que só
-se comunica por API).
-"""
+# Backend do projeto IHC (Text-to-SQL via Telegram)
 
 import sqlite3
 import os
@@ -21,7 +9,6 @@ DB_DIR = os.path.join(BASE_DIR, "database")
 DB_PATH = os.path.join(DB_DIR, "mercado.db")
 
 app = FastAPI(title="Mercado DB API")
-
 
 # Schema
 
@@ -45,11 +32,8 @@ Para perguntas envolvendo categoria de um produto, use JOIN entre
 produtos.categoria_id e categorias.id.
 """
 
-
 def get_schema() -> str:
     return SCHEMA_DESCRICAO
-
-
 
 def _criar_tabelas(conn: sqlite3.Connection) -> None:
     conn.execute("""
@@ -77,7 +61,6 @@ def _popular_dados_exemplo(conn: sqlite3.Connection) -> None:
         [(c,) for c in categorias],
     )
 
-   
     ids = dict(conn.execute("SELECT nome, id FROM categorias").fetchall())
 
     produtos = [
@@ -150,7 +133,6 @@ def initialize_db() -> None:
         conn.close()
 
 
-
 # Execução de queries geradas pela IA
 
 def execute_query(sql: str):
@@ -167,15 +149,11 @@ def execute_query(sql: str):
     finally:
         conn.close()
 
-
-
 # API 
-
 
 @app.on_event("startup")
 def _on_startup():
     initialize_db()
-
 
 @app.get("/query")
 def query(sql: str):
