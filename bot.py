@@ -18,26 +18,9 @@ lm = dspy.LM(LLM_MODEL, api_base='http://localhost:1337/v1', api_key='not-needed
 dspy.configure(lm=lm)
 
 class TextToSQL(dspy.Signature):
-    """Generate SQL from natural language.
-
-        Database schema:
-
-        categorias(
-            id INTEGER PRIMARY KEY,
-            nome TEXT
-        )
-
-        produtos(
-            id INTEGER PRIMARY KEY,
-            nome TEXT,
-            preco REAL,
-            estoque INTEGER,
-            categoria_id INTEGER  -- referencia categorias.id
-        )
-
-        Para perguntas envolvendo a categoria de um produto, use JOIN
-        entre produtos.categoria_id e categorias.id.
-    """
+    """Generate a SQLite query from a natural language question (in Portuguese).
+    Use only the tables and columns described in dbschema.
+    Return only the SQL query, without comments."""
     dbschema = dspy.InputField(desc="Databases schema")
     question = dspy.InputField(desc="Natural language question")
 
@@ -52,13 +35,25 @@ class ReliableSQLGenerator(dspy.Module):
         pred = self.generate_sql(dbschema=dbschema, question=question)
         return pred
 
-# Schema é fixo aqui (server.py só expõe 1 rota GET, então o bot
-# mantém sua própria cópia da descrição pra alimentar a IA)
-DB_SCHEMA = TextToSQL.__doc__
+def buscar_schema() -> str:
+    # O schema mora no server.py; o bot busca sempre a versão atual
+    resposta = requests.get(
+        f"{SERVER_URL}/query",
+        params={"schema": "true"},
+        timeout=15,
+    )
+    resposta.raise_for_status()
+    return resposta.json()["descricao"]
+
 
 def generate(question):
+    try:
+        schema = buscar_schema()
+    except requests.exceptions.RequestException as e:
+        return {"erro": f"Não foi possível buscar o schema no servidor: {e}"}
+
     generator = ReliableSQLGenerator()
-    sql = generator(dbschema=DB_SCHEMA, question=question)
+    sql = generator(dbschema=schema, question=question)
     print(f"{sql}\n{sql.sql_query}")
     results = execute_query_remota(sql.sql_query)
     return results
