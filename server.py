@@ -1,4 +1,4 @@
-# Backend do projeto IHC (Text-to-SQL via Telegram)
+# Backend do projeto IHC (Text-to-SQL via Telegram).
 
 import sqlite3
 import os

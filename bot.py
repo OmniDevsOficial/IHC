@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# URL do backend (server.py) rodando via uvicorn
+# URL do backend (server.py) rodando via uvicorn.
 # uvicorn server:app --reload   -> sobe em http://127.0.0.1:8000
 SERVER_URL = os.getenv("SERVER_URL", "http://127.0.0.1:8000")
 LLM_MODEL = os.getenv("LLM_MODEL", "openai/gemma-4-E2B-it-IQ4_XS")
