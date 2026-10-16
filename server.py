@@ -3,6 +3,7 @@
 import sqlite3
 import os
 import random
+from contextlib import asynccontextmanager
 from datetime import date, timedelta
 from typing import Optional
 from fastapi import FastAPI, HTTPException
@@ -11,7 +12,12 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_DIR = os.path.join(BASE_DIR, "database")
 DB_PATH = os.path.join(DB_DIR, "mercado.db")
 
-app = FastAPI(title="Mercado DB API")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    initialize_db()
+    yield
+
+app = FastAPI(title="Mercado DB API", lifespan=lifespan)
 
 # Schema
 
@@ -338,10 +344,6 @@ def execute_query(sql: str):
         conn.close()
 
 # API 
-
-@app.on_event("startup")
-def _on_startup():
-    initialize_db()
 
 @app.get("/query")
 def query(sql: Optional[str] = None, schema: bool = False):
