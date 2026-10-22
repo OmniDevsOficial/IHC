@@ -203,7 +203,7 @@ def execute_query_remota(sql: str):
 
 def _formatar_valor(valor) -> str:
     if valor is None:
-        return "—"
+        return "sem valor"
     if isinstance(valor, float):
         return f"{valor:.2f}"
     return str(valor)
@@ -215,6 +215,11 @@ def formatar_resposta(resultado) -> str:
         return f"Ops: {resultado['erro']}"
 
     if not resultado:
+        return "Não encontrei nenhum resultado para essa pergunta."
+
+    # SUM, AVG e afins devolvem uma linha com tudo nulo quando nada bate com o
+    # filtro. Sem isso, a resposta viraria algo como "total_em_reais: sem valor"
+    if len(resultado) == 1 and all(valor is None for valor in resultado[0].values()):
         return "Não encontrei nenhum resultado para essa pergunta."
 
     linhas = []
