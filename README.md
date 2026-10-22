@@ -29,14 +29,14 @@ database/            # criado automaticamente pelo servidor (não vai para o git
 ## Setup
 
 ```bash
-python -m venv .venv                  # cria o ambiente virtual (Windows: py -3.12 -m venv .venv)
-source ./.venv/Scripts/activate       # ativa no Git Bash (Linux: source .venv/bin/activate)
+python -m venv venv                   # cria o ambiente virtual (Windows: py -3.12 -m venv venv)
+source ./venv/Scripts/activate        # ativa no Git Bash (Linux: source venv/bin/activate)
 pip install pip-tools                 # instala o gerenciador de dependências
 pip-sync requirements.txt             # espelha o ambiente com o lock
 cp .env.example .env                  # copia o template e preenche o token (ver notas)
 ```
 
-No PowerShell, ative o ambiente com `.\.venv\Scripts\Activate.ps1`.
+No PowerShell, ative o ambiente com `.\venv\Scripts\Activate.ps1`.
 Se o `pip-sync` não for encontrado, use `python -m piptools sync requirements.txt`.
 
 ## Rodar
@@ -89,7 +89,7 @@ pip-compile --unsafe-package triton requirements.in   # gera o lock travado
 pip-sync requirements.txt                             # instala o que falta, remove o que sobrou
 ```
 
-Commite sempre os dois arquivos (`.in` e `.txt`). Depois de um `git pull`, basta ativar o `.venv` e rodar `pip-sync requirements.txt`.
+Commite sempre os dois arquivos (`.in` e `.txt`). Depois de um `git pull`, basta ativar o `venv` e rodar `pip-sync requirements.txt`.
 
 ## Notas
 
@@ -101,3 +101,4 @@ Commite sempre os dois arquivos (`.in` e `.txt`). Depois de um `git pull`, basta
 - **O Whisper roda em CPU.** O lock usa `torch+cpu` para manter a paridade com o Windows. Quem quiser GPU precisa instalar o torch CUDA à parte, fora do `pip-sync`.
 - **O Whisper exige ffmpeg** (`sudo apt install ffmpeg` / `winget install Gyan.FFmpeg` / `choco install ffmpeg`) e baixa o modelo na primeira transcrição. O modelo `tiny` pode errar palavras; `WHISPER_MODEL=base` melhora.
 - **A resposta é texto**, com no máximo 20 linhas e 4000 caracteres (o Telegram aceita 4096 por mensagem).
+- **O SQL gerado é validado antes de ir para o banco.** O bot monta um SQLite em memória com o mesmo schema e compila a consulta ali. Se o modelo errar, ele recebe o erro de volta e tenta de novo, até 3 vezes; depois disso o bot pede para reformular a pergunta. O terminal mostra o SQL e a tentativa de cada pergunta.
