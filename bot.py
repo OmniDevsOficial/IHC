@@ -4,6 +4,8 @@
 
 import dspy
 import os
+import re
+import sqlite3
 import tempfile
 import requests
 import telebot #pip install pytelegrambotapi
@@ -28,9 +30,87 @@ if not API_TOKEN:
 MAX_LINHAS = 20          # máximo de registros mostrados
 LIMITE_TELEGRAM = 4000   # o Telegram aceita 4096 caracteres por mensagem
 
+# Quantas vezes o gerador tenta de novo quando o SQL sai inválido
+MAX_TENTATIVAS = 3
+
 
 # ======================================================================
-# 2. LLM / GERADOR DE SQL
+# 2. SCHEMA E VALIDAÇÃO DO SQL
+# ======================================================================
+
+class ConsultaInvalida(Exception):
+    """O modelo não produziu um SQL válido dentro do limite de tentativas."""
+
+
+# Cache do schema (buscado no servidor na primeira pergunta)
+_schema_cache = None
+
+
+def obter_schema() -> dict:
+    """Descrição do schema e DDL das tabelas, buscados no servidor uma única vez.
+
+    O schema mora no server.py. Como o bot não importa o servidor, ele pega as
+    duas coisas pela rota: a descrição alimenta o modelo e o DDL monta o banco
+    em memória usado na validação.
+    """
+    global _schema_cache
+    if _schema_cache is None:
+        resposta = requests.get(
+            f"{SERVER_URL}/query",
+            params={"schema": "true"},
+            timeout=15,
+        )
+        resposta.raise_for_status()
+        dados = resposta.json()
+        _schema_cache = {"descricao": dados["descricao"], "ddl": dados.get("ddl", [])}
+    return _schema_cache
+
+
+def limpar_sql(sql: str) -> str:
+    """Deixa só a primeira instrução SQL, sem cerca de markdown e sem ponto e vírgula."""
+    texto = sql.strip()
+
+    # O modelo às vezes devolve o SQL dentro de ```sql ... ```
+    # (problema 2 do problemas_percebidos.txt)
+    if texto.startswith("```"):
+        texto = re.sub(r"^```[a-zA-Z]*\s*", "", texto)
+        texto = re.sub(r"```\s*$", "", texto)
+
+    texto = texto.strip()
+
+    # complete_statement respeita texto entre aspas e comentários, então cortar
+    # aqui não quebra uma consulta que tenha ponto e vírgula dentro de um valor
+    acumulado = ""
+    for caractere in texto:
+        acumulado += caractere
+        if sqlite3.complete_statement(acumulado):
+            texto = acumulado
+            break
+
+    return texto.strip().rstrip(";").strip()
+
+
+def validar_sql(sql: str, ddl) -> None:
+    """Compila o SQL num SQLite em memória com o mesmo schema do banco real.
+
+    O banco de verdade não é tocado: o EXPLAIN apenas prepara a consulta, o que
+    já pega erro de sintaxe, tabela ou coluna inexistente e nome ambíguo.
+    Levanta sqlite3.Error quando o SQL não presta.
+    """
+    if not sql:
+        raise sqlite3.ProgrammingError("o modelo não devolveu nenhum SQL")
+
+    conexao = sqlite3.connect(":memory:")
+    try:
+        for comando in ddl:
+            conexao.execute(comando)
+        conexao.execute(f"EXPLAIN {sql}")
+    finally:
+        conexao.close()
+
+
+# ======================================================================
+# 3. LLM / GERADOR DE SQL
 # ======================================================================
 
 lm = dspy.LM(LLM_MODEL, api_base=LLM_API_BASE, api_key='not-needed')
@@ -42,9 +122,13 @@ class TextToSQL(dspy.Signature):
     Use only the tables and columns described in dbschema.
     For calculated columns (SUM, COUNT, AVG, etc.), always give a readable alias
     in Portuguese snake_case, e.g. SUM(estoque * preco) AS total_em_reais.
+    When erro_anterior is not empty, it contains the queries you already tried
+    and the errors they raised: write a different query that fixes them, never
+    the same one again.
     Return only the SQL query, without comments."""
     dbschema = dspy.InputField(desc="Databases schema")
     question = dspy.InputField(desc="Natural language question")
+    erro_anterior = dspy.InputField(desc="Queries already tried and their errors, empty on the first attempt")
 
     sql_query = dspy.OutputField(desc="Valid SQL query")
 
@@ -54,35 +138,49 @@ class ReliableSQLGenerator(dspy.Module):
         super().__init__()
         self.generate_sql = dspy.ChainOfThought(TextToSQL)
 
-    def forward(self, dbschema, question):
-        # As etapas 3 e 4 (validação e correção do SQL) entram aqui, depois da geração
-        pred = self.generate_sql(dbschema=dbschema, question=question)
-        return pred
+    def forward(self, dbschema, question, ddl=()):
+        # O histórico inteiro vai de volta para o modelo. Além de dar mais
+        # contexto, isso muda o prompt a cada tentativa: com o prompt repetido,
+        # o cache do DSPy devolveria a mesma resposta e a tentativa seria perdida.
+        erros = []
+        ja_tentados = []
+
+        for tentativa in range(1, MAX_TENTATIVAS + 1):
+            pred = self.generate_sql(
+                dbschema=dbschema,
+                question=question,
+                erro_anterior="\n\n".join(erros),
+            )
+            sql = limpar_sql(pred.sql_query)
+
+            # A etapa 4 (checagem de só SELECT) entra aqui, sobre o SQL já limpo
+
+            try:
+                validar_sql(sql, ddl)
+            except sqlite3.Error as e:
+                print(f"Tentativa {tentativa}/{MAX_TENTATIVAS} inválida ({e}): {sql}")
+                detalhe = f"Tentativa {tentativa}:\nSQL: {sql}\nErro do SQLite: {e}"
+
+                if sql in ja_tentados:
+                    print("O modelo repetiu um SQL já recusado, então paro as tentativas aqui.")
+                    raise ConsultaInvalida("\n\n".join(erros + [detalhe]))
+
+                ja_tentados.append(sql)
+                erros.append(detalhe)
+                continue
+
+            print(f"SQL válido na tentativa {tentativa}/{MAX_TENTATIVAS}: {sql}")
+            return dspy.Prediction(sql_query=sql, tentativas=tentativa)
+
+        raise ConsultaInvalida("\n\n".join(erros))
 
 
 # Gerador criado uma única vez e reaproveitado em todas as perguntas
 generator = ReliableSQLGenerator()
 
-# Cache do schema (buscado no servidor na primeira pergunta)
-_schema_cache = None
-
-
-def obter_schema() -> str:
-    # O schema mora no server.py; o bot busca uma vez e guarda em cache
-    global _schema_cache
-    if _schema_cache is None:
-        resposta = requests.get(
-            f"{SERVER_URL}/query",
-            params={"schema": "true"},
-            timeout=15,
-        )
-        resposta.raise_for_status()
-        _schema_cache = resposta.json()["descricao"]
-    return _schema_cache
-
 
 # ======================================================================
-# 3. CONSULTA AO SERVIDOR
+# 4. CONSULTA AO SERVIDOR
 # ======================================================================
 
 def execute_query_remota(sql: str):
@@ -100,12 +198,12 @@ def execute_query_remota(sql: str):
 
 
 # ======================================================================
-# 4. RESPOSTA AO USUÁRIO
+# 5. RESPOSTA AO USUÁRIO
 # ======================================================================
 
 def _formatar_valor(valor) -> str:
     if valor is None:
-        return "—"
+        return "sem valor"
     if isinstance(valor, float):
         return f"{valor:.2f}"
     return str(valor)
@@ -117,6 +215,11 @@ def formatar_resposta(resultado) -> str:
         return f"Ops: {resultado['erro']}"
 
     if not resultado:
+        return "Não encontrei nenhum resultado para essa pergunta."
+
+    # SUM, AVG e afins devolvem uma linha com tudo nulo quando nada bate com o
+    # filtro. Sem isso, a resposta viraria algo como "total_em_reais: sem valor"
+    if len(resultado) == 1 and all(valor is None for valor in resultado[0].values()):
         return "Não encontrei nenhum resultado para essa pergunta."
 
     linhas = []
@@ -135,21 +238,39 @@ def formatar_resposta(resultado) -> str:
 
 
 def responder_pergunta(pergunta: str) -> str:
-    """Fluxo completo: pergunta em português -> SQL -> consulta -> texto de resposta."""
+    """Fluxo completo: pergunta em português -> SQL validado -> consulta -> texto de resposta."""
     try:
         schema = obter_schema()
     except requests.exceptions.RequestException as e:
         return f"Ops: não foi possível buscar o schema no servidor: {e}"
 
-    pred = generator(dbschema=schema, question=pergunta)
-    print(f"Pergunta: {pergunta}\nSQL: {pred.sql_query}")
+    print(f"Pergunta: {pergunta}")
+
+    try:
+        pred = generator(
+            dbschema=schema["descricao"],
+            question=pergunta,
+            ddl=schema["ddl"],
+        )
+    except ConsultaInvalida as e:
+        print(f"Desisti depois de {MAX_TENTATIVAS} tentativas. Último erro:\n{e}")
+        return (
+            "Não consegui montar uma consulta válida para essa pergunta. "
+            "Tente reformular, por exemplo citando o nome do produto ou da categoria."
+        )
+    except Exception as e:
+        print(f"Erro ao falar com o modelo de IA: {e}")
+        return (
+            "Ops: não consegui falar com o modelo de IA. "
+            "Confira se o Local API Server do Jan está ligado."
+        )
 
     resultado = execute_query_remota(pred.sql_query)
     return formatar_resposta(resultado)
 
 
 # ======================================================================
-# 5. VOZ (WHISPER)
+# 6. VOZ (WHISPER)
 # ======================================================================
 
 # Modelo carregado só na primeira transcrição e reaproveitado depois
@@ -175,7 +296,7 @@ def whisper_transcribe(filepath: str) -> str:
 
 
 # ======================================================================
-# 6. HANDLERS DO TELEGRAM + MAIN
+# 7. HANDLERS DO TELEGRAM + MAIN
 # ======================================================================
 
 bot = telebot.TeleBot(API_TOKEN)
