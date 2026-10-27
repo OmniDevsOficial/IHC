@@ -1,8 +1,10 @@
 # Backend do projeto IHC (Text-to-SQL via Telegram)
 
 import sqlite3
+import logging
 import os
 import random
+import time
 from contextlib import asynccontextmanager
 from datetime import date, timedelta
 from typing import Optional
@@ -11,6 +13,36 @@ from fastapi import FastAPI, HTTPException
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_DIR = os.path.join(BASE_DIR, "database")
 DB_PATH = os.path.join(DB_DIR, "mercado.db")
+
+
+# Logs no terminal
+
+FORMATO_LOG = "%(asctime)s %(levelname)s %(name)s %(message)s"
+HORA_LOG = "%H:%M:%S"
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format=FORMATO_LOG,
+    datefmt=HORA_LOG,
+)
+
+# O uvicorn configura o log dele antes de importar este arquivo, então basta
+# trocar o formatador aqui para as linhas dele também saírem com horário
+for _nome_logger in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+    for _handler in logging.getLogger(_nome_logger).handlers:
+        _handler.setFormatter(logging.Formatter(FORMATO_LOG, HORA_LOG))
+
+log = logging.getLogger("servidor")
+
+MAX_SQL_NO_LOG = 300  # corta SQL comprido para não poluir o terminal
+
+
+def _resumir_sql(sql: str) -> str:
+    uma_linha = " ".join(sql.split())
+    if len(uma_linha) > MAX_SQL_NO_LOG:
+        return uma_linha[:MAX_SQL_NO_LOG] + "..."
+    return uma_linha
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -316,6 +348,7 @@ def initialize_db() -> None:
     os.makedirs(DB_DIR, exist_ok=True)
     banco_novo = not os.path.exists(DB_PATH)
 
+    inicio = time.perf_counter()
     conn = sqlite3.connect(DB_PATH)
     try:
         conn.execute("PRAGMA foreign_keys = ON")
@@ -325,6 +358,19 @@ def initialize_db() -> None:
         conn.commit()
     finally:
         conn.close()
+
+    if banco_novo:
+        log.info(
+            "banco criado e populado em %s (%.2fs)",
+            DB_PATH,
+            time.perf_counter() - inicio,
+        )
+    else:
+        log.info(
+            "banco existente reaproveitado: %s. Se o schema mudou, apague o "
+            "arquivo e suba o servidor de novo",
+            DB_PATH,
+        )
 
 
 # Execução de queries geradas pela IA
@@ -349,15 +395,32 @@ def execute_query(sql: str):
 def query(sql: Optional[str] = None, schema: bool = False):
     # Com schema=true, ignora o sql e devolve a descrição e o DDL das tabelas
     if schema:
-        return {"descricao": get_schema(), "ddl": get_ddl()}
+        ddl = get_ddl()
+        log.info("schema entregue: %d tabelas no DDL", len(ddl))
+        return {"descricao": get_schema(), "ddl": ddl}
 
     if not sql:
+        log.warning("recusado: chamada sem o parametro sql e sem schema=true")
         raise HTTPException(status_code=400, detail="Informe o parâmetro 'sql' ou use schema=true.")
 
+    inicio = time.perf_counter()
     try:
         resultado = execute_query(sql)
+        log.info(
+            "consulta ok em %.3fs, %d linha(s): %s",
+            time.perf_counter() - inicio,
+            len(resultado),
+            _resumir_sql(sql),
+        )
         return {"sql": sql, "resultado": resultado}
     except sqlite3.Error as e:
+        log.warning(
+            "consulta falhou em %.3fs: %s (SQL: %s)",
+            time.perf_counter() - inicio,
+            e,
+            _resumir_sql(sql),
+        )
         raise HTTPException(status_code=400, detail=f"Erro ao executar SQL: {e}")
     except ValueError as e:
+        log.warning("consulta recusada: %s (SQL: %s)", e, _resumir_sql(sql))
         raise HTTPException(status_code=400, detail=str(e))
