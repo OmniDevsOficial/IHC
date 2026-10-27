@@ -3,10 +3,12 @@
 # ======================================================================
 
 import dspy
+import logging
 import os
 import re
 import sqlite3
 import tempfile
+import time
 import requests
 import telebot #pip install pytelegrambotapi
 import whisper #pip install -U openai-whisper
@@ -34,12 +36,42 @@ LIMITE_TELEGRAM = 4000   # o Telegram aceita 4096 caracteres por mensagem
 MAX_TENTATIVAS = 3
 
 
+# Logs no terminal: cada linha sai com horário, nível e origem.
+# LOG_LEVEL=DEBUG no .env mostra também o raciocínio do modelo em cada tentativa.
+FORMATO_LOG = "%(asctime)s %(levelname)s %(name)s %(message)s"
+HORA_LOG = "%H:%M:%S"
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format=FORMATO_LOG,
+    datefmt=HORA_LOG,
+)
+
+# Bibliotecas que falam demais no terminal: só avisos e erros
+for _nome_logger in ("LiteLLM", "httpx", "httpcore", "urllib3"):
+    logging.getLogger(_nome_logger).setLevel(logging.WARNING)
+
+telebot.logger.setLevel(logging.INFO)
+
+log = logging.getLogger("bot")
+
+# A linha de resumo fica num logger próprio, com nível fixo. Assim as etapas 5 e 6
+# podem rodar em lote com LOG_LEVEL=ERROR, sem o passo a passo de cada pergunta,
+# e ainda receber uma linha de números por pergunta.
+metricas = logging.getLogger("bot.metricas")
+metricas.setLevel(logging.INFO)
+
+
 # ======================================================================
 # 2. SCHEMA E VALIDAÇÃO DO SQL
 # ======================================================================
 
 class ConsultaInvalida(Exception):
     """O modelo não produziu um SQL válido dentro do limite de tentativas."""
+
+    def __init__(self, historico: str, tentativas: int = 0):
+        super().__init__(historico)
+        self.tentativas = tentativas
 
 
 # Cache do schema (buscado no servidor na primeira pergunta)
@@ -55,6 +87,7 @@ def obter_schema() -> dict:
     """
     global _schema_cache
     if _schema_cache is None:
+        inicio = time.perf_counter()
         resposta = requests.get(
             f"{SERVER_URL}/query",
             params={"schema": "true"},
@@ -63,6 +96,11 @@ def obter_schema() -> dict:
         resposta.raise_for_status()
         dados = resposta.json()
         _schema_cache = {"descricao": dados["descricao"], "ddl": dados.get("ddl", [])}
+        log.info(
+            "schema carregado do servidor em %.2fs (%d tabela(s) no DDL)",
+            time.perf_counter() - inicio,
+            len(_schema_cache["ddl"]),
+        )
     return _schema_cache
 
 
@@ -150,33 +188,37 @@ class ReliableSQLGenerator(dspy.Module):
         ja_tentados = []
 
         for tentativa in range(1, MAX_TENTATIVAS + 1):
+            log.info("tentativa %d/%d: pedindo o SQL ao modelo...", tentativa, MAX_TENTATIVAS)
+            inicio = time.perf_counter()
             pred = self.generate_sql(
                 dbschema=dbschema,
                 question=question,
                 erro_anterior="\n\n".join(erros),
             )
+            duracao = time.perf_counter() - inicio
             sql = limpar_sql(pred.sql_query)
+            log.info("tentativa %d/%d respondeu em %.1fs: %s", tentativa, MAX_TENTATIVAS, duracao, sql)
+            log.debug("raciocínio do modelo: %s", getattr(pred, "reasoning", ""))
 
             # A etapa 4 (checagem de só SELECT) entra aqui, sobre o SQL já limpo
 
             try:
                 validar_sql(sql, ddl)
             except sqlite3.Error as e:
-                print(f"Tentativa {tentativa}/{MAX_TENTATIVAS} inválida ({e}): {sql}")
+                log.warning("tentativa %d/%d inválida: %s", tentativa, MAX_TENTATIVAS, e)
                 detalhe = f"Tentativa {tentativa}:\nSQL: {sql}\nErro do SQLite: {e}"
 
                 if sql in ja_tentados:
-                    print("O modelo repetiu um SQL já recusado, então paro as tentativas aqui.")
-                    raise ConsultaInvalida("\n\n".join(erros + [detalhe]))
+                    log.warning("o modelo repetiu um SQL já recusado, então paro as tentativas aqui")
+                    raise ConsultaInvalida("\n\n".join(erros + [detalhe]), tentativa)
 
                 ja_tentados.append(sql)
                 erros.append(detalhe)
                 continue
 
-            print(f"SQL válido na tentativa {tentativa}/{MAX_TENTATIVAS}: {sql}")
             return dspy.Prediction(sql_query=sql, tentativas=tentativa)
 
-        raise ConsultaInvalida("\n\n".join(erros))
+        raise ConsultaInvalida("\n\n".join(erros), MAX_TENTATIVAS)
 
 
 # Gerador criado uma única vez e reaproveitado em todas as perguntas
@@ -198,6 +240,7 @@ def execute_query_remota(sql: str):
         dados = resposta.json()
         return dados.get("resultado", dados)
     except requests.exceptions.RequestException as e:
+        log.error("consulta ao servidor falhou: %s", e)
         return {"erro": f"Não foi possível consultar o servidor: {e}"}
 
 
@@ -241,15 +284,31 @@ def formatar_resposta(resultado) -> str:
     return texto
 
 
-def responder_pergunta(pergunta: str) -> str:
+def _logar_resumo(**medidas) -> None:
+    """Uma linha por pergunta, com os números que a etapa 5 vai querer medir."""
+    metricas.info("resumo %s", " ".join(f"{chave}={valor}" for chave, valor in medidas.items() if valor is not None))
+
+
+def responder_pergunta(pergunta: str, origem: str = "texto", transcricao_s=None) -> str:
     """Fluxo completo: pergunta em português -> SQL validado -> consulta -> texto de resposta."""
+    inicio_total = time.perf_counter()
+    log.info("pergunta por %s: %s", origem, pergunta.strip())
+
+    transcricao = f"{transcricao_s:.1f}" if transcricao_s is not None else None
+
     try:
         schema = obter_schema()
     except requests.exceptions.RequestException as e:
+        log.error("não foi possível buscar o schema no servidor: %s", e)
+        _logar_resumo(
+            origem=origem,
+            transcricao_s=transcricao,
+            status="sem_servidor",
+            total_s=f"{time.perf_counter() - inicio_total:.1f}",
+        )
         return f"Ops: não foi possível buscar o schema no servidor: {e}"
 
-    print(f"Pergunta: {pergunta}")
-
+    inicio_llm = time.perf_counter()
     try:
         pred = generator(
             dbschema=schema["descricao"],
@@ -257,19 +316,51 @@ def responder_pergunta(pergunta: str) -> str:
             ddl=schema["ddl"],
         )
     except ConsultaInvalida as e:
-        print(f"Desisti depois de {MAX_TENTATIVAS} tentativas. Último erro:\n{e}")
+        log.warning("desisti de gerar o SQL. Histórico:\n%s", e)
+        _logar_resumo(
+            origem=origem,
+            transcricao_s=transcricao,
+            status="sql_invalido",
+            tentativas=e.tentativas,
+            llm_s=f"{time.perf_counter() - inicio_llm:.1f}",
+            total_s=f"{time.perf_counter() - inicio_total:.1f}",
+        )
         return (
             "Não consegui montar uma consulta válida para essa pergunta. "
             "Tente reformular, por exemplo citando o nome do produto ou da categoria."
         )
     except Exception as e:
-        print(f"Erro ao falar com o modelo de IA: {e}")
+        log.error("erro ao falar com o modelo de IA: %s", e)
+        _logar_resumo(
+            origem=origem,
+            transcricao_s=transcricao,
+            status="erro_modelo",
+            llm_s=f"{time.perf_counter() - inicio_llm:.1f}",
+            total_s=f"{time.perf_counter() - inicio_total:.1f}",
+        )
         return (
             "Ops: não consegui falar com o modelo de IA. "
             "Confira se o Local API Server do Jan está ligado."
         )
+    tempo_llm = time.perf_counter() - inicio_llm
 
+    inicio_sql = time.perf_counter()
     resultado = execute_query_remota(pred.sql_query)
+    tempo_sql = time.perf_counter() - inicio_sql
+    linhas = len(resultado) if isinstance(resultado, list) else 0
+
+    erro_na_consulta = isinstance(resultado, dict) and "erro" in resultado
+    _logar_resumo(
+        origem=origem,
+        transcricao_s=transcricao,
+        status="erro_consulta" if erro_na_consulta else "ok",
+        tentativas=pred.tentativas,
+        llm_s=f"{tempo_llm:.1f}",
+        sql_s=f"{tempo_sql:.3f}",
+        linhas=linhas,
+        total_s=f"{time.perf_counter() - inicio_total:.1f}",
+    )
+
     return formatar_resposta(resultado)
 
 
@@ -284,7 +375,10 @@ _whisper_model = None
 def _obter_modelo_whisper():
     global _whisper_model
     if _whisper_model is None:
+        log.info("carregando o modelo do Whisper (%s), isso acontece uma vez só...", WHISPER_MODEL)
+        inicio = time.perf_counter()
         _whisper_model = whisper.load_model(WHISPER_MODEL)
+        log.info("Whisper pronto em %.1fs", time.perf_counter() - inicio)
     return _whisper_model
 
 
@@ -322,22 +416,29 @@ def handle_texto(message):
 
 @bot.message_handler(content_types=['voice'])
 def handle_voz(message):
+    log.info("áudio recebido (chat %s, %ss)", message.chat.id, message.voice.duration)
+
     # Baixamos o áudio antes de transcrever: o ffmpeg (usado pelo Whisper) não
     # consegue abrir a URL https do Telegram sozinho no Windows (falha de certificado).
     caminho_temp = None
     try:
+        inicio = time.perf_counter()
         info = bot.get_file(message.voice.file_id)
         audio_bytes = bot.download_file(info.file_path)
 
         with tempfile.NamedTemporaryFile(suffix=".oga", delete=False) as arquivo:
             arquivo.write(audio_bytes)
             caminho_temp = arquivo.name
+        log.info("áudio baixado: %d KB", len(audio_bytes) // 1024)
 
         texto = whisper_transcribe(caminho_temp)
-        bot.reply_to(message, responder_pergunta(texto))
+        transcricao_s = time.perf_counter() - inicio
+        log.info("transcrição em %.1fs: %s", transcricao_s, texto.strip())
+
+        bot.reply_to(message, responder_pergunta(texto, origem="voz", transcricao_s=transcricao_s))
     except Exception as e:
-        # Nunca imprime o token: remove-o da mensagem de erro, se aparecer
-        print(f"Erro ao processar áudio: {str(e).replace(API_TOKEN, '***')}")
+        # Nunca mostra o token: remove-o da mensagem de erro, se aparecer
+        log.error("erro ao processar áudio: %s", str(e).replace(API_TOKEN, "***"))
         bot.reply_to(message, "Ops: não consegui processar esse áudio.")
     finally:
         if caminho_temp and os.path.exists(caminho_temp):
@@ -345,7 +446,7 @@ def handle_voz(message):
 
 
 def main():
-    print(f"Bot iniciado. Consultando o backend em {SERVER_URL}")
+    log.info("bot iniciado, consultando o backend em %s", SERVER_URL)
     bot.polling()
 
 
