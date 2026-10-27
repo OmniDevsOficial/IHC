@@ -76,6 +76,10 @@ def limpar_sql(sql: str) -> str:
         texto = re.sub(r"^```[a-zA-Z]*\s*", "", texto)
         texto = re.sub(r"```\s*$", "", texto)
 
+    # O dspy fecha a resposta com [[ ## completed ## ]] e o modelo às vezes
+    # escreve esse marcador (ou uma variação dele) grudado no fim do SQL
+    texto = texto.split("[[", 1)[0]
+
     texto = texto.strip()
 
     # complete_statement respeita texto entre aspas e comentários, então cortar
