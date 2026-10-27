@@ -73,6 +73,7 @@ Com `schema=true`, o parâmetro `sql` é ignorado. É por essa rota que o bot bu
 | `LLM_MODEL` | Nome do modelo no Jan, com prefixo `openai/` | `openai/gemma-4-E2B-it-IQ4_XS` |
 | `LLM_API_BASE` | Endereço da API local do Jan | `http://localhost:1337/v1` |
 | `WHISPER_MODEL` | Tamanho do Whisper (`tiny`, `base`, `small`...) | `tiny` |
+| `LOG_LEVEL` | Detalhe dos logs no terminal (`DEBUG`, `INFO`, `WARNING` ou `ERROR`) | `INFO` |
 
 ## Banco de dados
 
@@ -101,4 +102,6 @@ Commite sempre os dois arquivos (`.in` e `.txt`). Depois de um `git pull`, basta
 - **O Whisper roda em CPU.** O lock usa `torch+cpu` para manter a paridade com o Windows. Quem quiser GPU precisa instalar o torch CUDA à parte, fora do `pip-sync`.
 - **O Whisper exige ffmpeg** (`sudo apt install ffmpeg` / `winget install Gyan.FFmpeg` / `choco install ffmpeg`) e baixa o modelo na primeira transcrição. O modelo `tiny` pode errar palavras; `WHISPER_MODEL=base` melhora.
 - **A resposta é texto**, com no máximo 20 linhas e 4000 caracteres (o Telegram aceita 4096 por mensagem).
+- **O terminal mostra o andamento de cada pergunta**, com horário em cada linha: pergunta recebida, tempo da transcrição, tempo e SQL de cada tentativa do modelo, erros de validação, consulta ao banco e uma linha final de resumo (`resumo origem=texto tentativas=1 llm_s=53.2 sql_s=0.004 linhas=1 total_s=53.3`). Com `LOG_LEVEL=DEBUG` sai também o raciocínio do modelo.
+- **A linha de resumo tem nível próprio** (`bot.metricas`), então ela aparece em qualquer `LOG_LEVEL`. Com `WARNING` ficam só ela e os avisos; com `ERROR`, só ela. É assim que se roda muitas perguntas de uma vez sem encher o terminal.
 - **O SQL gerado é validado antes de ir para o banco.** O bot monta um SQLite em memória com o mesmo schema e compila a consulta ali. Se o modelo errar, ele recebe o erro de volta e tenta de novo, até 3 vezes; depois disso o bot pede para reformular a pergunta. O terminal mostra o SQL e a tentativa de cada pergunta.
