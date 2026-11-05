@@ -63,7 +63,7 @@ Uma única rota, `GET /query`:
 | Executar uma consulta SELECT | `GET /query?sql=SELECT nome FROM categorias` |
 | Obter o schema (descrição + DDL das tabelas) | `GET /query?schema=true` |
 
-Com `schema=true`, o parâmetro `sql` é ignorado. É por essa rota que o bot busca o schema (uma vez, com cache). Sem `sql` e sem `schema`, a resposta é erro 400. Só consultas `SELECT` são aceitas.
+Com `schema=true`, o parâmetro `sql` é ignorado. É por essa rota que o bot busca o schema (uma vez, com cache). Sem `sql` e sem `schema`, a resposta é erro 400. Só consultas de leitura (`SELECT` ou `WITH`) são aceitas.
 
 ## Variáveis do `.env`
 
