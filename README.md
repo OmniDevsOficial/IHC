@@ -13,6 +13,7 @@ usuário (texto ou voz) → Telegram → Whisper → DSPy + LLM local → SQL �
 ```
 bot.py               # bot do Telegram (Whisper + DSPy); consulta o banco pela API
 server.py            # API FastAPI + banco SQLite (cria e popula o banco)
+eval/                # scripts de teste e dados de avaliação das etapas
 .env.example         # modelo das variáveis de ambiente (copie para .env)
 requirements.in      # dependências diretas (é este que você edita)
 requirements.txt     # lock gerado pelo pip-compile (não edite à mão)
@@ -105,3 +106,4 @@ Commite sempre os dois arquivos (`.in` e `.txt`). Depois de um `git pull`, basta
 - **O terminal mostra o andamento de cada pergunta**, com horário em cada linha: pergunta recebida, tempo da transcrição, tempo e SQL de cada tentativa do modelo, erros de validação, consulta ao banco e uma linha final de resumo (`resumo origem=texto tentativas=1 llm_s=53.2 sql_s=0.004 linhas=1 total_s=53.3`). Com `LOG_LEVEL=DEBUG` sai também o raciocínio do modelo.
 - **A linha de resumo tem nível próprio** (`bot.metricas`), então ela aparece em qualquer `LOG_LEVEL`. Com `WARNING` ficam só ela e os avisos; com `ERROR`, só ela. É assim que se roda muitas perguntas de uma vez sem encher o terminal.
 - **O SQL gerado é validado antes de ir para o banco.** O bot monta um SQLite em memória com o mesmo schema e compila a consulta ali. Se o modelo errar, ele recebe o erro de volta e tenta de novo, até 3 vezes; depois disso o bot pede para reformular a pergunta. O terminal mostra o SQL e a tentativa de cada pergunta.
+- **Só consultas de leitura são aceitas.** O bot bloqueia qualquer tentativa de escrita ou alteração num SQLite em memória (`set_authorizer`) antes mesmo de falar com o servidor, e pedidos bloqueados interrompem o laço na hora sem gastar novas tentativas do modelo. Como segunda camada de proteção, o servidor aceita apenas consultas iniciadas por `SELECT` ou `WITH` e abre o banco em modo somente leitura (`mode=ro`). Além disso, se uma consulta vier com várias instruções separadas por ponto e vírgula, ela é cortada na primeira instrução.
