@@ -13,7 +13,7 @@ usuário (texto ou voz) → Telegram → Whisper → DSPy + LLM local → SQL �
 ```
 bot.py               # bot do Telegram (Whisper + DSPy); consulta o banco pela API
 server.py            # API FastAPI + banco SQLite (cria e popula o banco)
-eval/                # scripts de teste e dados de avaliação das etapas
+eval/                # dataset (dataset.json), avaliador (avaliar.py), testes e resultados
 .env.example         # modelo das variáveis de ambiente (copie para .env)
 requirements.in      # dependências diretas (é este que você edita)
 requirements.txt     # lock gerado pelo pip-compile (não edite à mão)
@@ -92,6 +92,22 @@ pip-sync requirements.txt                             # instala o que falta, rem
 ```
 
 Commite sempre os dois arquivos (`.in` e `.txt`). Depois de um `git pull`, basta ativar o `venv` e rodar `pip-sync requirements.txt`.
+
+## Avaliação
+
+A pasta `eval/` contém o conjunto de testes automatizados e o avaliador da linha de base:
+
+- **Dataset (`eval/dataset.json`)**: 40 exemplos em português (30 consultas de leitura distribuídas em 12 categorias e 10 pedidos de escrita que devem ser bloqueados), divididos em `train` (25) e `dev` (15).
+- **Métricas**: *execution accuracy* (comparação dos resultados no banco real em modo somente leitura, ignorando aliases e ordem de linhas exceto quando há `ORDER BY`), taxa de SQL válido, média de tentativas, taxa de bloqueio correto e latência média.
+- **Execução**: o avaliador obtém o schema e consulta o SQLite diretamente via `server.py` em modo somente leitura (`mode=ro`), portanto **não precisa do `uvicorn` rodando** — exige apenas o **Local API Server do Jan** ligado (exceto no modo `--seco`). Como o modelo local pode ser lento, cada exemplo é salvo imediatamente linha a linha em `eval/resultados/<nome>.jsonl` e é possível limitar ou retomar rodadas:
+
+```bash
+python eval/avaliar.py --seco                                         # valida o dataset e os SQLs de referência (sem LLM)
+python eval/avaliar.py --split dev                                    # avalia o CoT + validação no conjunto dev
+python eval/avaliar.py --split dev --sem-validacao                    # avalia o CoT original (sem limpeza/validação)
+python eval/avaliar.py --split dev --limite 5 --nome teste-parcial    # avalia apenas os 5 primeiros exemplos
+python eval/avaliar.py --split dev --nome cot-validacao --retomar     # retoma de onde parou usando o .jsonl existente
+```
 
 ## Notas
 

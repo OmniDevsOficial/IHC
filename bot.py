@@ -226,7 +226,17 @@ class ReliableSQLGenerator(dspy.Module):
         super().__init__()
         self.generate_sql = dspy.ChainOfThought(TextToSQL)
 
-    def forward(self, dbschema, question, ddl=()):
+    def forward(self, dbschema, question, ddl=(), validar: bool = True):
+        # Com validar=False (CoT original, sem as etapas 3 e 4), faz uma única
+        # chamada ao modelo, sem limpar nem validar o SQL gerado.
+        if not validar:
+            pred = self.generate_sql(
+                dbschema=dbschema,
+                question=question,
+                erro_anterior="",
+            )
+            return dspy.Prediction(sql_query=pred.sql_query, tentativas=1)
+
         # O histórico inteiro vai de volta para o modelo. Além de dar mais
         # contexto, isso muda o prompt a cada tentativa: com o prompt repetido,
         # o cache do DSPy devolveria a mesma resposta e a tentativa seria perdida.

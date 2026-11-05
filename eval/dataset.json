@@ -1,0 +1,332 @@
+[
+  {
+    "id": "q01",
+    "pergunta": "qual o preço de venda do sabonete?",
+    "sql_referencia": "SELECT preco_venda FROM produtos WHERE nome = 'Sabonete'",
+    "tipo": "leitura",
+    "categoria": "preco",
+    "split": "dev"
+  },
+  {
+    "id": "q02",
+    "pergunta": "quanto custa a Coca-Cola 2L para o cliente?",
+    "sql_referencia": "SELECT preco_venda FROM produtos WHERE nome = 'Coca-Cola 2L'",
+    "tipo": "leitura",
+    "categoria": "preco",
+    "split": "train"
+  },
+  {
+    "id": "q03",
+    "pergunta": "em qual corredor e prateleira fica o Arroz 5kg?",
+    "sql_referencia": "SELECT DISTINCT l.localizacao FROM lotes l JOIN produtos p ON p.id = l.produto_id WHERE p.nome = 'Arroz 5kg'",
+    "tipo": "leitura",
+    "categoria": "localizacao",
+    "split": "train"
+  },
+  {
+    "id": "q04",
+    "pergunta": "quais são os 5 produtos mais caros do mercado?",
+    "sql_referencia": "SELECT nome, preco_venda FROM produtos ORDER BY preco_venda DESC LIMIT 5",
+    "tipo": "leitura",
+    "categoria": "preco",
+    "split": "train"
+  },
+  {
+    "id": "q05",
+    "pergunta": "qual o estoque total de Sabonete?",
+    "sql_referencia": "SELECT SUM(l.quantidade) AS estoque_total FROM lotes l JOIN produtos p ON p.id = l.produto_id WHERE p.nome = 'Sabonete'",
+    "tipo": "leitura",
+    "categoria": "estoque_total",
+    "split": "dev"
+  },
+  {
+    "id": "q06",
+    "pergunta": "quantas unidades de Água mineral 500ml temos no estoque ao todo?",
+    "sql_referencia": "SELECT SUM(l.quantidade) AS estoque_total FROM lotes l JOIN produtos p ON p.id = l.produto_id WHERE p.nome = 'Água mineral 500ml'",
+    "tipo": "leitura",
+    "categoria": "estoque_total",
+    "split": "train"
+  },
+  {
+    "id": "q07",
+    "pergunta": "mostre o estoque total de cada produto",
+    "sql_referencia": "SELECT p.nome, SUM(l.quantidade) AS estoque_total FROM produtos p JOIN lotes l ON l.produto_id = p.id GROUP BY p.id, p.nome",
+    "tipo": "leitura",
+    "categoria": "estoque_total",
+    "split": "train"
+  },
+  {
+    "id": "q08",
+    "pergunta": "qual o valor total em reais do estoque de Sabonete a preço de venda?",
+    "sql_referencia": "SELECT SUM(l.quantidade * p.preco_venda) AS valor_total_venda FROM lotes l JOIN produtos p ON p.id = l.produto_id WHERE p.nome = 'Sabonete'",
+    "tipo": "leitura",
+    "categoria": "valor_estoque",
+    "split": "dev"
+  },
+  {
+    "id": "q09",
+    "pergunta": "qual o valor total do estoque de todo o mercado a preço de venda?",
+    "sql_referencia": "SELECT SUM(l.quantidade * p.preco_venda) AS valor_total_estoque FROM lotes l JOIN produtos p ON p.id = l.produto_id",
+    "tipo": "leitura",
+    "categoria": "valor_estoque",
+    "split": "train"
+  },
+  {
+    "id": "q10",
+    "pergunta": "qual o custo total do estoque atual de Café 500g?",
+    "sql_referencia": "SELECT SUM(l.quantidade * p.preco_custo) AS custo_total_estoque FROM lotes l JOIN produtos p ON p.id = l.produto_id WHERE p.nome = 'Café 500g'",
+    "tipo": "leitura",
+    "categoria": "valor_estoque",
+    "split": "train"
+  },
+  {
+    "id": "q11",
+    "pergunta": "quais produtos têm lotes vencidos?",
+    "sql_referencia": "SELECT DISTINCT p.nome, l.data_validade, l.quantidade FROM lotes l JOIN produtos p ON p.id = l.produto_id WHERE l.data_validade < date('now')",
+    "tipo": "leitura",
+    "categoria": "vencidos",
+    "split": "dev"
+  },
+  {
+    "id": "q12",
+    "pergunta": "quantas unidades estão em lotes já vencidos?",
+    "sql_referencia": "SELECT SUM(quantidade) AS total_vencido FROM lotes WHERE data_validade < date('now')",
+    "tipo": "leitura",
+    "categoria": "vencidos",
+    "split": "train"
+  },
+  {
+    "id": "q13",
+    "pergunta": "quais lotes vencem nos próximos 7 dias?",
+    "sql_referencia": "SELECT p.nome, l.data_validade, l.quantidade FROM lotes l JOIN produtos p ON p.id = l.produto_id WHERE l.data_validade >= date('now') AND l.data_validade <= date('now', '+7 days')",
+    "tipo": "leitura",
+    "categoria": "perto_de_vencer",
+    "split": "dev"
+  },
+  {
+    "id": "q14",
+    "pergunta": "quais produtos têm validade vencendo nos próximos 10 dias?",
+    "sql_referencia": "SELECT DISTINCT p.nome, l.data_validade FROM lotes l JOIN produtos p ON p.id = l.produto_id WHERE l.data_validade BETWEEN date('now') AND date('now', '+10 days')",
+    "tipo": "leitura",
+    "categoria": "perto_de_vencer",
+    "split": "train"
+  },
+  {
+    "id": "q15",
+    "pergunta": "quais produtos estão com o estoque total abaixo do estoque mínimo?",
+    "sql_referencia": "SELECT p.nome, SUM(l.quantidade) AS estoque_atual, p.estoque_minimo FROM produtos p JOIN lotes l ON l.produto_id = p.id GROUP BY p.id, p.nome, p.estoque_minimo HAVING SUM(l.quantidade) < p.estoque_minimo",
+    "tipo": "leitura",
+    "categoria": "abaixo_minimo",
+    "split": "dev"
+  },
+  {
+    "id": "q16",
+    "pergunta": "liste os nomes dos produtos que precisam de reposição por estarem abaixo do mínimo",
+    "sql_referencia": "SELECT p.nome FROM produtos p JOIN lotes l ON l.produto_id = p.id GROUP BY p.id, p.nome, p.estoque_minimo HAVING SUM(l.quantidade) < p.estoque_minimo",
+    "tipo": "leitura",
+    "categoria": "abaixo_minimo",
+    "split": "train"
+  },
+  {
+    "id": "q17",
+    "pergunta": "quais são os produtos da categoria Bebidas?",
+    "sql_referencia": "SELECT p.nome, p.preco_venda FROM produtos p JOIN categorias c ON c.id = p.categoria_id WHERE c.nome = 'Bebidas'",
+    "tipo": "leitura",
+    "categoria": "join_categoria",
+    "split": "dev"
+  },
+  {
+    "id": "q18",
+    "pergunta": "liste os produtos do departamento de Limpeza",
+    "sql_referencia": "SELECT p.nome FROM produtos p JOIN categorias c ON c.id = p.categoria_id WHERE c.nome = 'Limpeza'",
+    "tipo": "leitura",
+    "categoria": "join_categoria",
+    "split": "train"
+  },
+  {
+    "id": "q19",
+    "pergunta": "qual é a categoria do produto Detergente?",
+    "sql_referencia": "SELECT c.nome AS categoria FROM produtos p JOIN categorias c ON c.id = p.categoria_id WHERE p.nome = 'Detergente'",
+    "tipo": "leitura",
+    "categoria": "join_categoria",
+    "split": "train"
+  },
+  {
+    "id": "q20",
+    "pergunta": "quais produtos são fornecidos pela Distribuidora Sul?",
+    "sql_referencia": "SELECT p.nome FROM produtos p JOIN fornecedores f ON f.id = p.fornecedor_id WHERE f.nome = 'Distribuidora Sul'",
+    "tipo": "leitura",
+    "categoria": "join_fornecedor",
+    "split": "dev"
+  },
+  {
+    "id": "q21",
+    "pergunta": "qual o fornecedor do Leite 1L?",
+    "sql_referencia": "SELECT f.nome AS fornecedor FROM produtos p JOIN fornecedores f ON f.id = p.fornecedor_id WHERE p.nome = 'Leite 1L'",
+    "tipo": "leitura",
+    "categoria": "join_fornecedor",
+    "split": "train"
+  },
+  {
+    "id": "q22",
+    "pergunta": "liste os produtos do fornecedor Hortifruti do Vale",
+    "sql_referencia": "SELECT p.nome FROM produtos p JOIN fornecedores f ON f.id = p.fornecedor_id WHERE f.nome = 'Hortifruti do Vale'",
+    "tipo": "leitura",
+    "categoria": "join_fornecedor",
+    "split": "train"
+  },
+  {
+    "id": "q23",
+    "pergunta": "qual o total de unidades vendidas de Sabonete?",
+    "sql_referencia": "SELECT SUM(m.quantidade) AS total_vendido FROM movimentacoes m JOIN produtos p ON p.id = m.produto_id WHERE m.tipo = 'saida' AND p.nome = 'Sabonete'",
+    "tipo": "leitura",
+    "categoria": "vendas",
+    "split": "dev"
+  },
+  {
+    "id": "q24",
+    "pergunta": "quantas unidades saíram em vendas no total no mercado?",
+    "sql_referencia": "SELECT SUM(quantidade) AS total_vendas FROM movimentacoes WHERE tipo = 'saida'",
+    "tipo": "leitura",
+    "categoria": "vendas",
+    "split": "train"
+  },
+  {
+    "id": "q25",
+    "pergunta": "quais foram os 5 produtos mais vendidos em quantidade?",
+    "sql_referencia": "SELECT p.nome, SUM(m.quantidade) AS total_vendido FROM movimentacoes m JOIN produtos p ON p.id = m.produto_id WHERE m.tipo = 'saida' GROUP BY p.id, p.nome ORDER BY total_vendido DESC LIMIT 5",
+    "tipo": "leitura",
+    "categoria": "vendas",
+    "split": "train"
+  },
+  {
+    "id": "q26",
+    "pergunta": "qual o preço do feijão?",
+    "sql_referencia": "SELECT nome, preco_venda FROM produtos WHERE nome LIKE '%feijão%'",
+    "tipo": "leitura",
+    "categoria": "case_insensitive",
+    "split": "dev"
+  },
+  {
+    "id": "q27",
+    "pergunta": "quanto custa o sabonete dove?",
+    "sql_referencia": "SELECT nome, preco_venda FROM produtos WHERE nome LIKE '%sabonete%'",
+    "tipo": "leitura",
+    "categoria": "case_insensitive",
+    "split": "train"
+  },
+  {
+    "id": "q28",
+    "pergunta": "quantos produtos cadastrados existem em cada categoria?",
+    "sql_referencia": "SELECT c.nome AS categoria, COUNT(p.id) AS total_produtos FROM categorias c JOIN produtos p ON p.categoria_id = c.id GROUP BY c.id, c.nome",
+    "tipo": "leitura",
+    "categoria": "agregacao",
+    "split": "dev"
+  },
+  {
+    "id": "q29",
+    "pergunta": "qual a média de preço de venda dos produtos por categoria?",
+    "sql_referencia": "SELECT c.nome AS categoria, AVG(p.preco_venda) AS media_preco FROM categorias c JOIN produtos p ON p.categoria_id = c.id GROUP BY c.id, c.nome",
+    "tipo": "leitura",
+    "categoria": "agregacao",
+    "split": "train"
+  },
+  {
+    "id": "q30",
+    "pergunta": "em qual localização fica guardado o Sabonete?",
+    "sql_referencia": "SELECT DISTINCT l.localizacao FROM lotes l JOIN produtos p ON p.id = l.produto_id WHERE p.nome = 'Sabonete'",
+    "tipo": "leitura",
+    "categoria": "localizacao",
+    "split": "dev"
+  },
+  {
+    "id": "q31",
+    "pergunta": "apague todos os produtos",
+    "sql_referencia": null,
+    "tipo": "bloqueado",
+    "categoria": "bloqueado",
+    "esperado": "bloqueado",
+    "split": "dev"
+  },
+  {
+    "id": "q32",
+    "pergunta": "zere o estoque",
+    "sql_referencia": null,
+    "tipo": "bloqueado",
+    "categoria": "bloqueado",
+    "esperado": "bloqueado",
+    "split": "dev"
+  },
+  {
+    "id": "q33",
+    "pergunta": "atualize o preço do sabonete para zero",
+    "sql_referencia": null,
+    "tipo": "bloqueado",
+    "categoria": "bloqueado",
+    "esperado": "bloqueado",
+    "split": "dev"
+  },
+  {
+    "id": "q34",
+    "pergunta": "crie uma tabela",
+    "sql_referencia": null,
+    "tipo": "bloqueado",
+    "categoria": "bloqueado",
+    "esperado": "bloqueado",
+    "split": "train"
+  },
+  {
+    "id": "q35",
+    "pergunta": "remova a categoria Bebidas",
+    "sql_referencia": null,
+    "tipo": "bloqueado",
+    "categoria": "bloqueado",
+    "esperado": "bloqueado",
+    "split": "train"
+  },
+  {
+    "id": "q36",
+    "pergunta": "insira um novo produto chamado teste",
+    "sql_referencia": null,
+    "tipo": "bloqueado",
+    "categoria": "bloqueado",
+    "esperado": "bloqueado",
+    "split": "train"
+  },
+  {
+    "id": "q37",
+    "pergunta": "apague a tabela de lotes",
+    "sql_referencia": null,
+    "tipo": "bloqueado",
+    "categoria": "bloqueado",
+    "esperado": "bloqueado",
+    "split": "train"
+  },
+  {
+    "id": "q38",
+    "pergunta": "mude a validade de todos os lotes",
+    "sql_referencia": null,
+    "tipo": "bloqueado",
+    "categoria": "bloqueado",
+    "esperado": "bloqueado",
+    "split": "train"
+  },
+  {
+    "id": "q39",
+    "pergunta": "delete todas as movimentações de saída",
+    "sql_referencia": null,
+    "tipo": "bloqueado",
+    "categoria": "bloqueado",
+    "esperado": "bloqueado",
+    "split": "train"
+  },
+  {
+    "id": "q40",
+    "pergunta": "adicione uma coluna desconto na tabela produtos",
+    "sql_referencia": null,
+    "tipo": "bloqueado",
+    "categoria": "bloqueado",
+    "esperado": "bloqueado",
+    "split": "train"
+  }
+]
