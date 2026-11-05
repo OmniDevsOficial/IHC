@@ -132,23 +132,69 @@ def limpar_sql(sql: str) -> str:
     return texto.strip().rstrip(";").strip()
 
 
-def validar_sql(sql: str, ddl) -> None:
+ACOES_ESCRITA = {
+    sqlite3.SQLITE_INSERT,
+    sqlite3.SQLITE_UPDATE,
+    sqlite3.SQLITE_DELETE,
+    sqlite3.SQLITE_CREATE_INDEX,
+    sqlite3.SQLITE_CREATE_TABLE,
+    sqlite3.SQLITE_CREATE_TEMP_INDEX,
+    sqlite3.SQLITE_CREATE_TEMP_TABLE,
+    sqlite3.SQLITE_CREATE_TEMP_TRIGGER,
+    sqlite3.SQLITE_CREATE_TEMP_VIEW,
+    sqlite3.SQLITE_CREATE_TRIGGER,
+    sqlite3.SQLITE_CREATE_VIEW,
+    sqlite3.SQLITE_CREATE_VTABLE,
+    sqlite3.SQLITE_DROP_INDEX,
+    sqlite3.SQLITE_DROP_TABLE,
+    sqlite3.SQLITE_DROP_TEMP_INDEX,
+    sqlite3.SQLITE_DROP_TEMP_TABLE,
+    sqlite3.SQLITE_DROP_TEMP_TRIGGER,
+    sqlite3.SQLITE_DROP_TEMP_VIEW,
+    sqlite3.SQLITE_DROP_TRIGGER,
+    sqlite3.SQLITE_DROP_VIEW,
+    sqlite3.SQLITE_DROP_VTABLE,
+    sqlite3.SQLITE_ALTER_TABLE,
+    sqlite3.SQLITE_TRANSACTION,
+    sqlite3.SQLITE_ATTACH,
+    sqlite3.SQLITE_DETACH,
+    sqlite3.SQLITE_REINDEX,
+    sqlite3.SQLITE_ANALYZE,
+    sqlite3.SQLITE_PRAGMA,
+}
+
+
+def bloquear_escrita(action, *args):
+    """Autorizador do SQLite que nega qualquer operação de escrita ou alteração."""
+    if action in ACOES_ESCRITA:
+        return sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK
+
+
+def validar_sql(sql: str, ddl_schema) -> None:
     """Compila o SQL num SQLite em memória com o mesmo schema do banco real.
 
     O banco de verdade não é tocado: o EXPLAIN apenas prepara a consulta, o que
     já pega erro de sintaxe, tabela ou coluna inexistente e nome ambíguo.
-    Levanta sqlite3.Error quando o SQL não presta.
+    O authorizer garante que apenas consultas de leitura (SELECT) passem.
+    Levanta PermissionError quando o SQL tenta escrita/alteração e sqlite3.Error
+    quando o SQL não presta.
     """
     if not sql:
         raise sqlite3.ProgrammingError("o modelo não devolveu nenhum SQL")
 
-    conexao = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(":memory:")
     try:
-        for comando in ddl:
-            conexao.execute(comando)
-        conexao.execute(f"EXPLAIN {sql}")
+        for comando in ddl_schema:
+            conn.execute(comando)
+        conn.set_authorizer(bloquear_escrita)
+        conn.execute(f"EXPLAIN {sql}")
+    except sqlite3.DatabaseError as e:
+        if "not authorized" in str(e).lower():
+            raise PermissionError("Bloqueado: Apenas consultas (SELECT) são permitidas.") from e
+        raise
     finally:
-        conexao.close()
+        conn.close()
 
 
 # ======================================================================
@@ -200,10 +246,15 @@ class ReliableSQLGenerator(dspy.Module):
             log.info("tentativa %d/%d respondeu em %.1fs: %s", tentativa, MAX_TENTATIVAS, duracao, sql)
             log.debug("raciocínio do modelo: %s", getattr(pred, "reasoning", ""))
 
-            # A etapa 4 (checagem de só SELECT) entra aqui, sobre o SQL já limpo
-
             try:
                 validar_sql(sql, ddl)
+            except PermissionError as e:
+                log.warning("tentativa %d/%d bloqueada: %s (SQL: %s)", tentativa, MAX_TENTATIVAS, e, sql)
+                return dspy.Prediction(
+                    sql_query=None,
+                    erro=str(e),
+                    tentativas=tentativa,
+                )
             except sqlite3.Error as e:
                 log.warning("tentativa %d/%d inválida: %s", tentativa, MAX_TENTATIVAS, e)
                 detalhe = f"Tentativa {tentativa}:\nSQL: {sql}\nErro do SQLite: {e}"
@@ -343,6 +394,17 @@ def responder_pergunta(pergunta: str, origem: str = "texto", transcricao_s=None)
             "Confira se o Local API Server do Jan está ligado."
         )
     tempo_llm = time.perf_counter() - inicio_llm
+
+    if getattr(pred, "erro", None):
+        _logar_resumo(
+            origem=origem,
+            transcricao_s=transcricao,
+            status="sql_bloqueado",
+            tentativas=pred.tentativas,
+            llm_s=f"{tempo_llm:.1f}",
+            total_s=f"{time.perf_counter() - inicio_total:.1f}",
+        )
+        return pred.erro
 
     inicio_sql = time.perf_counter()
     resultado = execute_query_remota(pred.sql_query)

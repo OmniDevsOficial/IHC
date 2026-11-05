@@ -376,11 +376,11 @@ def initialize_db() -> None:
 # Execução de queries geradas pela IA
 
 def execute_query(sql: str):
-    sql_normalizado = sql.strip().lower()
-    if not sql_normalizado.startswith("select"):
-        raise ValueError("Por segurança, só são permitidas consultas SELECT.")
+    sql_normalizado = sql.strip().upper()
+    if not sql_normalizado.startswith(("SELECT", "WITH")):
+        raise ValueError("Por segurança, só são permitidas consultas SELECT ou WITH.")
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     try:
         conn.row_factory = sqlite3.Row
         cursor = conn.execute(sql)
