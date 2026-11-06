@@ -11,8 +11,9 @@ RAIZ = Path(__file__).resolve().parent.parent
 if str(RAIZ) not in sys.path:
     sys.path.insert(0, str(RAIZ))
 
-# Token falso apenas para permitir o import do bot.py sem ler o token real
-os.environ.setdefault("TELEGRAM_API_TOKEN", "token-falso-so-para-teste")
+# Token falso apenas para permitir o import do bot.py sem ler o token real.
+# Ele segue o formato id:segredo porque o telebot recusa token sem dois-pontos
+os.environ.setdefault("TELEGRAM_API_TOKEN", "123456:token-falso-so-para-teste")
 
 
 def _garantir_stubs_se_sem_venv() -> None:
@@ -63,7 +64,7 @@ def _garantir_stubs_se_sem_venv() -> None:
 
 _garantir_stubs_se_sem_venv()
 
-from bot import limpar_sql, validar_sql  # noqa: E402
+from bot import separar_instrucoes, validar_sql  # noqa: E402
 
 DDL_MINIMO = [
     "CREATE TABLE produtos (id INTEGER PRIMARY KEY, nome TEXT, preco_venda REAL)"
@@ -78,15 +79,27 @@ CASOS = [
     ("CREATE TABLE x (a INT)", "BLOQUEADO"),
     ("WITH t AS (SELECT 1) DELETE FROM produtos", "BLOQUEADO"),
     ("PRAGMA table_info(produtos)", "BLOQUEADO"),
-    ("SELECT nome FROM produtos; DROP TABLE produtos", "PASSOU"),
     ("DELETE FROM nao_existe", "INVALIDO"),
+    # Comandos que não são escrita, mas também não são leitura
+    ("SAVEPOINT x", "BLOQUEADO"),
+    ("RELEASE x", "BLOQUEADO"),
+    ("ROLLBACK TO x", "BLOQUEADO"),
+    ("VACUUM", "BLOQUEADO"),
+    # Várias instruções: só a primeira vai para o banco, mas escrita em
+    # qualquer uma delas bloqueia o pedido inteiro
+    ("SELECT nome FROM produtos; DROP TABLE produtos", "BLOQUEADO"),
+    ("SELECT nome FROM nao_existe; DELETE FROM produtos", "BLOQUEADO"),
+    ("SELECT nome FROM produtos; SELECT id FROM produtos", "PASSOU"),
+    ("SELECT nome FROM produtos;\nEssa consulta lista os nomes.", "PASSOU"),
+    ("```sql\nSELECT nome FROM produtos;\n```\n[[ ## completed ## ]]", "PASSOU"),
 ]
 
 
 def classificar_sql(sql_bruto: str) -> tuple[str, str]:
-    sql_limpo = limpar_sql(sql_bruto)
+    instrucoes = separar_instrucoes(sql_bruto)
+    sql_limpo = instrucoes[0] if instrucoes else ""
     try:
-        validar_sql(sql_limpo, DDL_MINIMO)
+        validar_sql(sql_limpo, DDL_MINIMO, instrucoes[1:])
         return "PASSOU", sql_limpo
     except PermissionError:
         return "BLOQUEADO", sql_limpo
