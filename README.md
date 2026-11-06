@@ -1,8 +1,8 @@
-# Text-to-SQL via Telegram — IHC
+# Text-to-SQL via Telegram (IHC)
 
-Projeto da disciplina de **Interação Humano-Computador (IHC)** — 3º DSM / Fatec.
+Projeto da disciplina de **Interação Humano-Computador (IHC)**, 3º DSM / Fatec.
 
-Explora uma forma natural de interação com dados: em vez de escrever SQL, o usuário pergunta em português a um bot do Telegram — por texto ou áudio — e o sistema traduz a pergunta em consulta SQL, executa no banco e devolve o resultado em texto.
+Explora uma forma natural de interação com dados: em vez de escrever SQL, o usuário pergunta em português a um bot do Telegram (por texto ou áudio), e o sistema traduz a pergunta em consulta SQL, executa no banco e devolve o resultado em texto.
 
 ```
 usuário (texto ou voz) → Telegram → Whisper → DSPy + LLM local → SQL → API FastAPI → SQLite → resposta
@@ -13,6 +13,7 @@ usuário (texto ou voz) → Telegram → Whisper → DSPy + LLM local → SQL �
 ```
 bot.py               # bot do Telegram (Whisper + DSPy); consulta o banco pela API
 server.py            # API FastAPI + banco SQLite (cria e popula o banco)
+eval/                # scripts de teste e dados de avaliação das etapas
 .env.example         # modelo das variáveis de ambiente (copie para .env)
 requirements.in      # dependências diretas (é este que você edita)
 requirements.txt     # lock gerado pelo pip-compile (não edite à mão)
@@ -62,13 +63,13 @@ Uma única rota, `GET /query`:
 | Executar uma consulta SELECT | `GET /query?sql=SELECT nome FROM categorias` |
 | Obter o schema (descrição + DDL das tabelas) | `GET /query?schema=true` |
 
-Com `schema=true`, o parâmetro `sql` é ignorado. É por essa rota que o bot busca o schema (uma vez, com cache). Sem `sql` e sem `schema`, a resposta é erro 400. Só consultas `SELECT` são aceitas.
+Com `schema=true`, o parâmetro `sql` é ignorado. É por essa rota que o bot busca o schema (uma vez, com cache). Sem `sql` e sem `schema`, a resposta é erro 400. Só consultas de leitura (`SELECT` ou `WITH`) são aceitas.
 
 ## Variáveis do `.env`
 
 | Variável | Descrição | Padrão |
 |---|---|---|
-| `TELEGRAM_API_TOKEN` | Token do bot (obrigatório) | — |
+| `TELEGRAM_API_TOKEN` | Token do bot (obrigatório) | (nenhum) |
 | `SERVER_URL` | Endereço do servidor FastAPI | `http://127.0.0.1:8000` |
 | `LLM_MODEL` | Nome do modelo no Jan, com prefixo `openai/` | `openai/gemma-4-E2B-it-IQ4_XS` |
 | `LLM_API_BASE` | Endereço da API local do Jan | `http://localhost:1337/v1` |
@@ -105,3 +106,4 @@ Commite sempre os dois arquivos (`.in` e `.txt`). Depois de um `git pull`, basta
 - **O terminal mostra o andamento de cada pergunta**, com horário em cada linha: pergunta recebida, tempo da transcrição, tempo e SQL de cada tentativa do modelo, erros de validação, consulta ao banco e uma linha final de resumo (`resumo origem=texto tentativas=1 llm_s=53.2 sql_s=0.004 linhas=1 total_s=53.3`). Com `LOG_LEVEL=DEBUG` sai também o raciocínio do modelo.
 - **A linha de resumo tem nível próprio** (`bot.metricas`), então ela aparece em qualquer `LOG_LEVEL`. Com `WARNING` ficam só ela e os avisos; com `ERROR`, só ela. É assim que se roda muitas perguntas de uma vez sem encher o terminal.
 - **O SQL gerado é validado antes de ir para o banco.** O bot monta um SQLite em memória com o mesmo schema e compila a consulta ali. Se o modelo errar, ele recebe o erro de volta e tenta de novo, até 3 vezes; depois disso o bot pede para reformular a pergunta. O terminal mostra o SQL e a tentativa de cada pergunta.
+- **Só consultas de leitura são aceitas.** O bot compila a consulta num SQLite em memória com um autorizador (`set_authorizer`) que só libera leitura, então qualquer escrita ou alteração é bloqueada antes mesmo de falar com o servidor. Pedidos bloqueados interrompem o laço na hora, sem gastar novas tentativas do modelo. Se o modelo devolver várias instruções separadas por ponto e vírgula, o bot manda só a primeira para o servidor, e bloqueia o pedido inteiro se alguma das outras for escrita. Como segunda camada de proteção, o servidor aceita uma instrução por vez, iniciada por `SELECT` ou `WITH`, e abre o banco em modo somente leitura (`mode=ro`).

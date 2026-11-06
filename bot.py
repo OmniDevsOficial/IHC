@@ -104,8 +104,12 @@ def obter_schema() -> dict:
     return _schema_cache
 
 
-def limpar_sql(sql: str) -> str:
-    """Deixa só a primeira instrução SQL, sem cerca de markdown e sem ponto e vírgula."""
+def separar_instrucoes(sql: str) -> list[str]:
+    """Separa a resposta do modelo em instruções SQL, sem cerca de markdown e sem ponto e vírgula.
+
+    A primeira instrução é a consulta que vai para o banco. As outras nunca são
+    enviadas, mas a validação confere se alguma delas é escrita.
+    """
     texto = sql.strip()
 
     # O modelo às vezes devolve o SQL dentro de ```sql ... ```
@@ -118,37 +122,89 @@ def limpar_sql(sql: str) -> str:
     # escreve esse marcador (ou uma variação dele) grudado no fim do SQL
     texto = texto.split("[[", 1)[0]
 
-    texto = texto.strip()
-
-    # complete_statement respeita texto entre aspas e comentários, então cortar
+    # complete_statement respeita texto entre aspas e comentários, então separar
     # aqui não quebra uma consulta que tenha ponto e vírgula dentro de um valor
+    instrucoes = []
     acumulado = ""
     for caractere in texto:
         acumulado += caractere
         if sqlite3.complete_statement(acumulado):
-            texto = acumulado
-            break
+            instrucoes.append(acumulado)
+            acumulado = ""
+    instrucoes.append(acumulado)
 
-    return texto.strip().rstrip(";").strip()
+    limpas = (instrucao.strip().rstrip(";").strip() for instrucao in instrucoes)
+    return [instrucao for instrucao in limpas if instrucao]
 
 
-def validar_sql(sql: str, ddl) -> None:
+# Ações que uma consulta de leitura pede ao SQLite. O autorizador nega todas as
+# outras, então um comando que ninguém lembrou de listar também fica bloqueado.
+ACOES_LEITURA = {
+    sqlite3.SQLITE_SELECT,
+    sqlite3.SQLITE_READ,
+    sqlite3.SQLITE_FUNCTION,
+    sqlite3.SQLITE_RECURSIVE,
+}
+
+MENSAGEM_BLOQUEIO = "Bloqueado: Apenas consultas (SELECT) são permitidas."
+
+
+def _compilar_so_leitura(conn, sql: str) -> None:
+    """Compila o SQL com EXPLAIN, liberando só as ações de leitura.
+
+    Levanta PermissionError quando o SQL não é leitura e sqlite3.Error quando
+    ele não compila.
+    """
+    acoes = []
+
+    def autorizar(acao, *args):
+        acoes.append(acao)
+        return sqlite3.SQLITE_OK if acao in ACOES_LEITURA else sqlite3.SQLITE_DENY
+
+    conn.set_authorizer(autorizar)
+    try:
+        conn.execute(f"EXPLAIN {sql}")
+    except sqlite3.DatabaseError as e:
+        if any(acao not in ACOES_LEITURA for acao in acoes):
+            raise PermissionError(MENSAGEM_BLOQUEIO) from e
+        raise
+
+    # Alguns comandos, como o VACUUM, nem passam pelo autorizador. Toda leitura
+    # passa por SQLITE_SELECT, então o que não passou não é consulta
+    if sqlite3.SQLITE_SELECT not in acoes:
+        raise PermissionError(MENSAGEM_BLOQUEIO)
+
+
+def validar_sql(sql: str, ddl_schema, extras=()) -> None:
     """Compila o SQL num SQLite em memória com o mesmo schema do banco real.
 
     O banco de verdade não é tocado: o EXPLAIN apenas prepara a consulta, o que
     já pega erro de sintaxe, tabela ou coluna inexistente e nome ambíguo.
-    Levanta sqlite3.Error quando o SQL não presta.
+    O autorizador garante que só consultas de leitura passem.
+    `extras` são as instruções que o modelo escreveu depois da primeira: elas
+    não vão para o banco, mas se alguma for escrita o pedido inteiro é bloqueado.
+    Levanta PermissionError quando há escrita ou alteração e sqlite3.Error
+    quando o SQL não presta.
     """
     if not sql:
         raise sqlite3.ProgrammingError("o modelo não devolveu nenhum SQL")
 
-    conexao = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(":memory:")
     try:
-        for comando in ddl:
-            conexao.execute(comando)
-        conexao.execute(f"EXPLAIN {sql}")
+        for comando in ddl_schema:
+            conn.execute(comando)
+
+        # As extras vêm antes para que a escrita tenha prioridade sobre um erro
+        # na consulta. Extra que não compila é texto solto do modelo e é ignorada
+        for extra in extras:
+            try:
+                _compilar_so_leitura(conn, extra)
+            except sqlite3.Error:
+                pass
+
+        _compilar_so_leitura(conn, sql)
     finally:
-        conexao.close()
+        conn.close()
 
 
 # ======================================================================
@@ -196,14 +252,25 @@ class ReliableSQLGenerator(dspy.Module):
                 erro_anterior="\n\n".join(erros),
             )
             duracao = time.perf_counter() - inicio
-            sql = limpar_sql(pred.sql_query)
+            instrucoes = separar_instrucoes(pred.sql_query)
+            sql = instrucoes[0] if instrucoes else ""
+            extras = instrucoes[1:]
             log.info("tentativa %d/%d respondeu em %.1fs: %s", tentativa, MAX_TENTATIVAS, duracao, sql)
+            if extras:
+                log.info("tentativa %d/%d trouxe instruções a mais, que não vão para o banco: %s",
+                         tentativa, MAX_TENTATIVAS, "; ".join(extras))
             log.debug("raciocínio do modelo: %s", getattr(pred, "reasoning", ""))
 
-            # A etapa 4 (checagem de só SELECT) entra aqui, sobre o SQL já limpo
-
             try:
-                validar_sql(sql, ddl)
+                validar_sql(sql, ddl, extras)
+            except PermissionError as e:
+                log.warning("tentativa %d/%d bloqueada: %s (SQL: %s)",
+                            tentativa, MAX_TENTATIVAS, e, "; ".join(instrucoes))
+                return dspy.Prediction(
+                    sql_query=None,
+                    erro=str(e),
+                    tentativas=tentativa,
+                )
             except sqlite3.Error as e:
                 log.warning("tentativa %d/%d inválida: %s", tentativa, MAX_TENTATIVAS, e)
                 detalhe = f"Tentativa {tentativa}:\nSQL: {sql}\nErro do SQLite: {e}"
@@ -343,6 +410,17 @@ def responder_pergunta(pergunta: str, origem: str = "texto", transcricao_s=None)
             "Confira se o Local API Server do Jan está ligado."
         )
     tempo_llm = time.perf_counter() - inicio_llm
+
+    if getattr(pred, "erro", None):
+        _logar_resumo(
+            origem=origem,
+            transcricao_s=transcricao,
+            status="sql_bloqueado",
+            tentativas=pred.tentativas,
+            llm_s=f"{tempo_llm:.1f}",
+            total_s=f"{time.perf_counter() - inicio_total:.1f}",
+        )
+        return pred.erro
 
     inicio_sql = time.perf_counter()
     resultado = execute_query_remota(pred.sql_query)
