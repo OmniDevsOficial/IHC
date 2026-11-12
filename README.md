@@ -13,7 +13,7 @@ usuário (texto ou voz) → Telegram → Whisper → DSPy + LLM local → SQL �
 ```
 bot.py               # bot do Telegram (Whisper + DSPy); consulta o banco pela API
 server.py            # API FastAPI + banco SQLite (cria e popula o banco)
-eval/                # scripts de teste e dados de avaliação das etapas
+eval/                # dataset de avaliação (dataset.json), testes e resultados (RESULTADOS.md)
 .env.example         # modelo das variáveis de ambiente (copie para .env)
 requirements.in      # dependências diretas (é este que você edita)
 requirements.txt     # lock gerado pelo pip-compile (não edite à mão)
@@ -92,6 +92,26 @@ pip-sync requirements.txt                             # instala o que falta, rem
 ```
 
 Commite sempre os dois arquivos (`.in` e `.txt`). Depois de um `git pull`, basta ativar o `venv` e rodar `pip-sync requirements.txt`.
+
+## Avaliação
+
+O próprio `bot.py` avalia o gerador com o `dspy.Evaluate`. Com `--avaliar` ele roda o dataset e sai, sem subir o Telegram (dá para deixar o bot ligado em outro terminal, mas usar o bot durante a avaliação atrapalha a latência medida).
+
+- **Dataset (`eval/dataset.json`)**: 40 exemplos em português (30 consultas de leitura em 12 categorias e 10 pedidos de escrita que devem ser bloqueados), divididos em `train` (25) e `dev` (15).
+- **Métricas**: *execution accuracy*, taxa de SQL válido, tentativas até um SQL válido, taxa de bloqueio correto e latência média. Na *execution accuracy*, o resultado gerado precisa conter o da referência: aliases e colunas a mais não importam, a ordem das linhas só conta quando a referência tem `ORDER BY` e linhas repetidas não contam quando ela tem `DISTINCT`.
+- **Execução**: precisa do `uvicorn` e do Local API Server do Jan ligados, como o bot. O schema e os SQLs passam pela rota `/query`. O cache do DSPy fica desligado durante a avaliação, para a latência ser real.
+
+```bash
+python eval/teste_dataset.py                  # confere o dataset e as referências (sem LLM e sem uvicorn)
+python eval/teste_metrica.py                  # testa a métrica (sem LLM e sem uvicorn)
+python bot.py --avaliar                       # CoT + validação no split dev
+python bot.py --avaliar --sem-validacao       # CoT original, sem limpeza, validação e checagem de SELECT
+python bot.py --avaliar --split train --limite 5
+```
+
+O resumo sai no terminal e os detalhes por pergunta em `eval/resultados/<rodada>-<split>.json`. Os números da linha de base estão em [`eval/RESULTADOS.md`](eval/RESULTADOS.md).
+
+As datas do seed são relativas ao dia em que o banco foi criado, e as perguntas de validade usam `date('now')`. Por isso, **apague `database/mercado.db` e suba o servidor de novo antes de avaliar**: num banco antigo, os lotes "perto de vencer" já venceram e os números mudam de uma máquina para outra.
 
 ## Notas
 

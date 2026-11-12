@@ -2,13 +2,17 @@
 # 1. CONFIGURAÇÃO
 # ======================================================================
 
+import argparse
 import dspy
+import itertools
+import json
 import logging
 import os
 import re
 import sqlite3
 import tempfile
 import time
+from collections import Counter
 import requests
 import telebot #pip install pytelegrambotapi
 import whisper #pip install -U openai-whisper
@@ -236,7 +240,17 @@ class ReliableSQLGenerator(dspy.Module):
         super().__init__()
         self.generate_sql = dspy.ChainOfThought(TextToSQL)
 
-    def forward(self, dbschema, question, ddl=()):
+    def forward(self, dbschema, question, ddl=(), validar: bool = True):
+        # Com validar=False (CoT original, sem as etapas 3 e 4), faz uma única
+        # chamada ao modelo, sem limpar nem validar o SQL gerado.
+        if not validar:
+            pred = self.generate_sql(
+                dbschema=dbschema,
+                question=question,
+                erro_anterior="",
+            )
+            return dspy.Prediction(sql_query=pred.sql_query, tentativas=1)
+
         # O histórico inteiro vai de volta para o modelo. Além de dar mais
         # contexto, isso muda o prompt a cada tentativa: com o prompt repetido,
         # o cache do DSPy devolveria a mesma resposta e a tentativa seria perdida.
@@ -472,7 +486,7 @@ def whisper_transcribe(filepath: str) -> str:
 
 
 # ======================================================================
-# 7. HANDLERS DO TELEGRAM + MAIN
+# 7. HANDLERS DO TELEGRAM
 # ======================================================================
 
 bot = telebot.TeleBot(API_TOKEN)
@@ -523,10 +537,299 @@ def handle_voz(message):
             os.remove(caminho_temp)
 
 
-def main():
+# ======================================================================
+# 8. AVALIAÇÃO (ETAPA 5)
+# ======================================================================
+# `python bot.py --avaliar` roda o eval/dataset.json sem subir o Telegram.
+# Precisa do server.py e do Jan ligados, igual ao bot: o schema e a execução
+# dos SQLs passam pela mesma rota /query que o usuário usa.
+
+PASTA_EVAL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eval")
+CAMINHO_DATASET = os.path.join(PASTA_EVAL, "dataset.json")
+PASTA_RESULTADOS = os.path.join(PASTA_EVAL, "resultados")
+
+
+class ErroNaConsulta(Exception):
+    """O servidor recusou ou não conseguiu executar o SQL."""
+
+
+def normalizar_linha(valores) -> tuple:
+    """Arredonda os floats para a comparação não depender de casas decimais."""
+    return tuple(round(valor, 2) if isinstance(valor, float) else valor for valor in valores)
+
+
+def executar_para_avaliar(sql: str) -> list[tuple]:
+    """Executa o SQL pela rota do servidor e devolve as linhas como tuplas, na ordem das colunas.
+
+    Levanta ErroNaConsulta quando o SQL não presta. Servidor desligado levanta
+    a exceção do requests, para a avaliação parar em vez de contar tudo como erro.
+    """
+    if not sql or not sql.strip():
+        raise ErroNaConsulta("SQL vazio")
+
+    resposta = requests.get(f"{SERVER_URL}/query", params={"sql": sql}, timeout=15)
+    if resposta.status_code == 400:
+        raise ErroNaConsulta(resposta.json().get("detail", resposta.text))
+    resposta.raise_for_status()
+    return [normalizar_linha(linha.values()) for linha in resposta.json()["resultado"]]
+
+
+def _iguais(a: list, b: list, modo: str) -> bool:
+    if modo == "ordem":
+        return a == b
+    if modo == "conjunto":
+        return set(a) == set(b)
+    return Counter(a) == Counter(b)
+
+
+def mesmo_resultado(linhas_pred: list[tuple], linhas_ref: list[tuple], sql_ref: str) -> bool:
+    """Confere se o resultado gerado contém o resultado da referência.
+
+    Nomes de coluna (aliases) não importam, e colunas a mais no SQL gerado são
+    aceitas: o que conta é existir, entre as colunas geradas, uma coluna com os
+    valores de cada coluna da referência. A ordem das linhas só importa quando a
+    referência tem ORDER BY, e linhas repetidas não contam quando ela tem DISTINCT.
+    """
+    if re.search(r"\bORDER\s+BY\b", sql_ref, flags=re.IGNORECASE):
+        modo = "ordem"
+    elif re.search(r"\bSELECT\s+DISTINCT\b", sql_ref, flags=re.IGNORECASE):
+        modo = "conjunto"
+    else:
+        modo = "contagem"
+
+    if not linhas_ref or not linhas_pred:
+        return not linhas_ref and not linhas_pred
+
+    n_ref = len(linhas_ref[0])
+    n_pred = len(linhas_pred[0])
+
+    def coluna(linhas, i):
+        return [linha[i] for linha in linhas]
+
+    # Para cada coluna da referência, as colunas geradas com os mesmos valores.
+    # Isso corta as combinações antes de comparar as linhas inteiras
+    candidatas = [
+        [i for i in range(n_pred) if _iguais(coluna(linhas_pred, i), coluna(linhas_ref, j), modo)]
+        for j in range(n_ref)
+    ]
+
+    for colunas in itertools.product(*candidatas):
+        if len(set(colunas)) < n_ref:
+            continue
+        projetadas = [tuple(linha[i] for i in colunas) for linha in linhas_pred]
+        if _iguais(projetadas, linhas_ref, modo):
+            return True
+    return False
+
+
+def metrica_execucao(example, pred, trace=None, pred_name=None, pred_trace=None) -> float:
+    """Execution accuracy: 1.0 se acertou, 0.0 se errou.
+
+    Pedido de escrita acerta quando o gerador bloqueia. Consulta de leitura
+    acerta quando o resultado gerado contém o da referência (mesmo_resultado).
+    Aceita os cinco argumentos que o dspy.GEPA exige (etapa 6).
+    """
+    erro = getattr(pred, "erro", None)
+    if example.tipo == "bloqueado":
+        return 1.0 if erro else 0.0
+
+    sql = getattr(pred, "sql_query", None)
+    if erro or not sql:
+        return 0.0
+
+    try:
+        linhas_pred = executar_para_avaliar(sql)
+    except ErroNaConsulta:
+        return 0.0
+
+    # A referência foi conferida pelo eval/teste_dataset.py. Se ela falhar aqui,
+    # o problema é do dataset, então a exceção não é engolida
+    linhas_ref = executar_para_avaliar(example.sql_referencia)
+    return 1.0 if mesmo_resultado(linhas_pred, linhas_ref, example.sql_referencia) else 0.0
+
+
+def carregar_dataset() -> tuple[list, list]:
+    """Lê o eval/dataset.json e devolve (trainset, devset) como dspy.Example."""
+    schema = obter_schema()
+    with open(CAMINHO_DATASET, encoding="utf-8") as arquivo:
+        itens = json.load(arquivo)
+
+    conjuntos = {"train": [], "dev": []}
+    for item in itens:
+        exemplo = dspy.Example(
+            id=item["id"],
+            dbschema=schema["descricao"],
+            question=item["pergunta"],
+            ddl=schema["ddl"],
+            sql_referencia=item.get("sql_referencia"),
+            tipo=item["tipo"],
+            categoria=item["categoria"],
+        ).with_inputs("dbschema", "question", "ddl")
+        conjuntos[item["split"]].append(exemplo)
+
+    return conjuntos["train"], conjuntos["dev"]
+
+
+class GeradorAvaliado(dspy.Module):
+    """Envolve o gerador para o dspy.Evaluate: mede o tempo e devolve SQL inválido como predição."""
+
+    def __init__(self, validar: bool = True):
+        super().__init__()
+        self.gerador = generator
+        self.validar = validar
+
+    def forward(self, dbschema, question, ddl=()):
+        inicio = time.perf_counter()
+        try:
+            pred = self.gerador(dbschema=dbschema, question=question, ddl=ddl, validar=self.validar)
+        except ConsultaInvalida as e:
+            return dspy.Prediction(
+                sql_query=None,
+                erro=None,
+                tentativas=e.tentativas,
+                status="sql_invalido",
+                latencia_s=time.perf_counter() - inicio,
+            )
+
+        erro = getattr(pred, "erro", None)
+        return dspy.Prediction(
+            sql_query=pred.sql_query,
+            erro=erro,
+            tentativas=pred.tentativas,
+            status="bloqueado" if erro else "ok",
+            latencia_s=time.perf_counter() - inicio,
+        )
+
+
+def _media(valores: list) -> float | None:
+    return sum(valores) / len(valores) if valores else None
+
+
+def _resumir(resultados, nome: str, split: str, validar: bool) -> dict:
+    registros = []
+    for exemplo, pred, nota in resultados:
+        # Predição vazia é exemplo em que o dspy.Evaluate pegou uma exceção (Jan fora do ar, por exemplo)
+        status = getattr(pred, "status", None) or "erro_modelo"
+        sql = getattr(pred, "sql_query", None)
+
+        sql_valido = False
+        if exemplo.tipo == "leitura" and status == "ok":
+            try:
+                executar_para_avaliar(sql)
+                sql_valido = True
+            except ErroNaConsulta:
+                pass
+
+        latencia = getattr(pred, "latencia_s", None)
+        registros.append({
+            "id": exemplo.id,
+            "tipo": exemplo.tipo,
+            "categoria": exemplo.categoria,
+            "pergunta": exemplo.question,
+            "sql_referencia": exemplo.sql_referencia,
+            "sql_gerado": sql,
+            "status": status,
+            "tentativas": getattr(pred, "tentativas", None),
+            "sql_valido": sql_valido,
+            "acertou": nota,
+            "latencia_s": round(latencia, 2) if latencia is not None else None,
+        })
+
+    leituras = [r for r in registros if r["tipo"] == "leitura"]
+    bloqueados = [r for r in registros if r["tipo"] == "bloqueado"]
+
+    def arredondar(valor, casas=4):
+        return round(valor, casas) if valor is not None else None
+
+    return {
+        "nome": nome,
+        "split": split,
+        "validacao_ativa": validar,
+        "exemplos": len(registros),
+        "leituras": len(leituras),
+        "bloqueados": len(bloqueados),
+        "execution_accuracy": arredondar(_media([r["acertou"] for r in leituras])),
+        "taxa_sql_valido": arredondar(_media([r["sql_valido"] for r in leituras])),
+        # Como na 5.1: tentativas até chegar num SQL válido, só nas leituras que chegaram
+        "tentativas_ate_valido": arredondar(_media([r["tentativas"] for r in leituras if r["sql_valido"]]), 2),
+        "taxa_bloqueio_correto": arredondar(_media([r["acertou"] for r in bloqueados])),
+        "latencia_media_s": arredondar(_media([r["latencia_s"] for r in registros if r["latencia_s"] is not None]), 2),
+        "registros": registros,
+    }
+
+
+def _porcentagem(valor) -> str:
+    return f"{valor * 100:.1f}%" if valor is not None else "n/a"
+
+
+def avaliar(split: str = "dev", validar: bool = True, limite: int | None = None) -> int:
+    """Roda o dspy.Evaluate no split escolhido, imprime o resumo e salva em eval/resultados/."""
+    # Sem cache: com ele, uma pergunta já feita volta na hora, o que estraga a
+    # latência, e a primeira tentativa com validação reaproveitaria a resposta
+    # da rodada sem validação, porque o prompt é o mesmo
+    dspy.configure_cache(enable_disk_cache=False, enable_memory_cache=False)
+
+    trainset, devset = carregar_dataset()
+    exemplos = {"dev": devset, "train": trainset, "todos": trainset + devset}[split]
+    if limite is not None:
+        exemplos = exemplos[:limite]
+
+    nome = "cot-validacao" if validar else "cot-original"
+    log.info("avaliação %s: %d exemplo(s) do split %s", nome, len(exemplos), split)
+
+    avaliador = dspy.Evaluate(
+        devset=exemplos,
+        metric=metrica_execucao,
+        num_threads=1,  # o Jan atende uma pergunta por vez; em paralelo, a latência sairia errada
+        display_progress=True,
+    )
+    resultado = avaliador(GeradorAvaliado(validar=validar))
+    resumo = _resumir(resultado.results, nome, split, validar)
+
+    print(f"\n{'id':<5}{'categoria':<18}{'status':<14}{'tent.':>6}{'tempo':>8}  acertou")
+    for r in resumo["registros"]:
+        tempo = f"{r['latencia_s']:.1f}s" if r["latencia_s"] is not None else "n/a"
+        print(f"{r['id']:<5}{r['categoria']:<18}{r['status']:<14}{str(r['tentativas']):>6}{tempo:>8}  {r['acertou']:.0f}")
+
+    print(f"\n=== {nome} (split {split}, {resumo['exemplos']} exemplos) ===")
+    print(f"Execution accuracy       : {_porcentagem(resumo['execution_accuracy'])}")
+    print(f"SQL válido               : {_porcentagem(resumo['taxa_sql_valido'])}")
+    print(f"Tentativas até SQL válido: {resumo['tentativas_ate_valido']}")
+    print(f"Bloqueio correto         : {_porcentagem(resumo['taxa_bloqueio_correto'])}")
+    print(f"Latência média           : {resumo['latencia_media_s']}s")
+
+    os.makedirs(PASTA_RESULTADOS, exist_ok=True)
+    sufixo = f"-limite{limite}" if limite is not None else ""
+    caminho = os.path.join(PASTA_RESULTADOS, f"{nome}-{split}{sufixo}.json")
+    with open(caminho, "w", encoding="utf-8") as arquivo:
+        json.dump(resumo, arquivo, ensure_ascii=False, indent=2)
+    print(f"Detalhes em {caminho}")
+    return 0
+
+
+# ======================================================================
+# 9. MAIN
+# ======================================================================
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Bot de Text-to-SQL no Telegram")
+    parser.add_argument("--avaliar", action="store_true",
+                        help="roda o eval/dataset.json (etapa 5) em vez de subir o bot")
+    parser.add_argument("--split", choices=("dev", "train", "todos"), default="dev",
+                        help="com --avaliar: conjunto de exemplos (padrão: dev)")
+    parser.add_argument("--sem-validacao", action="store_true",
+                        help="com --avaliar: mede o CoT original, sem limpeza, validação e checagem de SELECT")
+    parser.add_argument("--limite", type=int,
+                        help="com --avaliar: usa só os N primeiros exemplos do split")
+    args = parser.parse_args()
+
+    if args.avaliar:
+        return avaliar(args.split, validar=not args.sem_validacao, limite=args.limite)
+
     log.info("bot iniciado, consultando o backend em %s", SERVER_URL)
     bot.polling()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
