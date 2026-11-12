@@ -26,7 +26,7 @@
   {
     "id": "q04",
     "pergunta": "quais são os 5 produtos mais caros do mercado?",
-    "sql_referencia": "SELECT nome, preco_venda FROM produtos ORDER BY preco_venda DESC LIMIT 5",
+    "sql_referencia": "SELECT nome FROM produtos ORDER BY preco_venda DESC LIMIT 5",
     "tipo": "leitura",
     "categoria": "preco",
     "split": "train"
@@ -82,7 +82,7 @@
   {
     "id": "q11",
     "pergunta": "quais produtos têm lotes vencidos?",
-    "sql_referencia": "SELECT DISTINCT p.nome, l.data_validade, l.quantidade FROM lotes l JOIN produtos p ON p.id = l.produto_id WHERE l.data_validade < date('now')",
+    "sql_referencia": "SELECT DISTINCT p.nome FROM lotes l JOIN produtos p ON p.id = l.produto_id WHERE l.data_validade < date('now')",
     "tipo": "leitura",
     "categoria": "vencidos",
     "split": "dev"
@@ -97,8 +97,8 @@
   },
   {
     "id": "q13",
-    "pergunta": "quais lotes vencem nos próximos 7 dias?",
-    "sql_referencia": "SELECT p.nome, l.data_validade, l.quantidade FROM lotes l JOIN produtos p ON p.id = l.produto_id WHERE l.data_validade >= date('now') AND l.data_validade <= date('now', '+7 days')",
+    "pergunta": "quais produtos têm lotes vencendo nos próximos 7 dias?",
+    "sql_referencia": "SELECT DISTINCT p.nome FROM lotes l JOIN produtos p ON p.id = l.produto_id WHERE l.data_validade >= date('now') AND l.data_validade <= date('now', '+7 days')",
     "tipo": "leitura",
     "categoria": "perto_de_vencer",
     "split": "dev"
@@ -106,7 +106,7 @@
   {
     "id": "q14",
     "pergunta": "quais produtos têm validade vencendo nos próximos 10 dias?",
-    "sql_referencia": "SELECT DISTINCT p.nome, l.data_validade FROM lotes l JOIN produtos p ON p.id = l.produto_id WHERE l.data_validade BETWEEN date('now') AND date('now', '+10 days')",
+    "sql_referencia": "SELECT DISTINCT p.nome FROM lotes l JOIN produtos p ON p.id = l.produto_id WHERE l.data_validade BETWEEN date('now') AND date('now', '+10 days')",
     "tipo": "leitura",
     "categoria": "perto_de_vencer",
     "split": "train"
@@ -114,7 +114,7 @@
   {
     "id": "q15",
     "pergunta": "quais produtos estão com o estoque total abaixo do estoque mínimo?",
-    "sql_referencia": "SELECT p.nome, SUM(l.quantidade) AS estoque_atual, p.estoque_minimo FROM produtos p JOIN lotes l ON l.produto_id = p.id GROUP BY p.id, p.nome, p.estoque_minimo HAVING SUM(l.quantidade) < p.estoque_minimo",
+    "sql_referencia": "SELECT p.nome FROM produtos p JOIN lotes l ON l.produto_id = p.id GROUP BY p.id, p.nome, p.estoque_minimo HAVING SUM(l.quantidade) < p.estoque_minimo",
     "tipo": "leitura",
     "categoria": "abaixo_minimo",
     "split": "dev"
@@ -130,7 +130,7 @@
   {
     "id": "q17",
     "pergunta": "quais são os produtos da categoria Bebidas?",
-    "sql_referencia": "SELECT p.nome, p.preco_venda FROM produtos p JOIN categorias c ON c.id = p.categoria_id WHERE c.nome = 'Bebidas'",
+    "sql_referencia": "SELECT p.nome FROM produtos p JOIN categorias c ON c.id = p.categoria_id WHERE c.nome = 'Bebidas'",
     "tipo": "leitura",
     "categoria": "join_categoria",
     "split": "dev"
@@ -194,7 +194,7 @@
   {
     "id": "q25",
     "pergunta": "quais foram os 5 produtos mais vendidos em quantidade?",
-    "sql_referencia": "SELECT p.nome, SUM(m.quantidade) AS total_vendido FROM movimentacoes m JOIN produtos p ON p.id = m.produto_id WHERE m.tipo = 'saida' GROUP BY p.id, p.nome ORDER BY total_vendido DESC LIMIT 5",
+    "sql_referencia": "SELECT p.nome FROM movimentacoes m JOIN produtos p ON p.id = m.produto_id WHERE m.tipo = 'saida' GROUP BY p.id, p.nome ORDER BY SUM(m.quantidade) DESC LIMIT 5",
     "tipo": "leitura",
     "categoria": "vendas",
     "split": "train"
@@ -202,7 +202,7 @@
   {
     "id": "q26",
     "pergunta": "qual o preço do feijão?",
-    "sql_referencia": "SELECT nome, preco_venda FROM produtos WHERE nome LIKE '%feijão%'",
+    "sql_referencia": "SELECT preco_venda FROM produtos WHERE nome LIKE '%feijão%'",
     "tipo": "leitura",
     "categoria": "case_insensitive",
     "split": "dev"
@@ -210,7 +210,7 @@
   {
     "id": "q27",
     "pergunta": "quanto custa o sabonete dove?",
-    "sql_referencia": "SELECT nome, preco_venda FROM produtos WHERE nome LIKE '%sabonete%'",
+    "sql_referencia": "SELECT preco_venda FROM produtos WHERE nome LIKE '%sabonete%'",
     "tipo": "leitura",
     "categoria": "case_insensitive",
     "split": "train"

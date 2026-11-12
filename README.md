@@ -1,8 +1,8 @@
-# Text-to-SQL via Telegram — IHC
+# Text-to-SQL via Telegram (IHC)
 
-Projeto da disciplina de **Interação Humano-Computador (IHC)** — 3º DSM / Fatec.
+Projeto da disciplina de **Interação Humano-Computador (IHC)**, 3º DSM / Fatec.
 
-Explora uma forma natural de interação com dados: em vez de escrever SQL, o usuário pergunta em português a um bot do Telegram — por texto ou áudio — e o sistema traduz a pergunta em consulta SQL, executa no banco e devolve o resultado em texto.
+Explora uma forma natural de interação com dados: em vez de escrever SQL, o usuário pergunta em português a um bot do Telegram (por texto ou áudio), e o sistema traduz a pergunta em consulta SQL, executa no banco e devolve o resultado em texto.
 
 ```
 usuário (texto ou voz) → Telegram → Whisper → DSPy + LLM local → SQL → API FastAPI → SQLite → resposta
@@ -13,7 +13,7 @@ usuário (texto ou voz) → Telegram → Whisper → DSPy + LLM local → SQL �
 ```
 bot.py               # bot do Telegram (Whisper + DSPy); consulta o banco pela API
 server.py            # API FastAPI + banco SQLite (cria e popula o banco)
-eval/                # dataset (dataset.json), avaliador (avaliar.py), testes e resultados
+eval/                # dataset de avaliação (dataset.json), testes e resultados (RESULTADOS.md)
 .env.example         # modelo das variáveis de ambiente (copie para .env)
 requirements.in      # dependências diretas (é este que você edita)
 requirements.txt     # lock gerado pelo pip-compile (não edite à mão)
@@ -69,7 +69,7 @@ Com `schema=true`, o parâmetro `sql` é ignorado. É por essa rota que o bot bu
 
 | Variável | Descrição | Padrão |
 |---|---|---|
-| `TELEGRAM_API_TOKEN` | Token do bot (obrigatório) | — |
+| `TELEGRAM_API_TOKEN` | Token do bot (obrigatório) | (nenhum) |
 | `SERVER_URL` | Endereço do servidor FastAPI | `http://127.0.0.1:8000` |
 | `LLM_MODEL` | Nome do modelo no Jan, com prefixo `openai/` | `openai/gemma-4-E2B-it-IQ4_XS` |
 | `LLM_API_BASE` | Endereço da API local do Jan | `http://localhost:1337/v1` |
@@ -95,19 +95,23 @@ Commite sempre os dois arquivos (`.in` e `.txt`). Depois de um `git pull`, basta
 
 ## Avaliação
 
-A pasta `eval/` contém o conjunto de testes automatizados e o avaliador da linha de base:
+O próprio `bot.py` avalia o gerador com o `dspy.Evaluate`. Com `--avaliar` ele roda o dataset e sai, sem subir o Telegram (dá para deixar o bot ligado em outro terminal, mas usar o bot durante a avaliação atrapalha a latência medida).
 
-- **Dataset (`eval/dataset.json`)**: 40 exemplos em português (30 consultas de leitura distribuídas em 12 categorias e 10 pedidos de escrita que devem ser bloqueados), divididos em `train` (25) e `dev` (15).
-- **Métricas**: *execution accuracy* (comparação dos resultados no banco real em modo somente leitura, ignorando aliases e ordem de linhas exceto quando há `ORDER BY`), taxa de SQL válido, média de tentativas, taxa de bloqueio correto e latência média.
-- **Execução**: o avaliador obtém o schema e consulta o SQLite diretamente via `server.py` em modo somente leitura (`mode=ro`), portanto **não precisa do `uvicorn` rodando** — exige apenas o **Local API Server do Jan** ligado (exceto no modo `--seco`). Como o modelo local pode ser lento, cada exemplo é salvo imediatamente linha a linha em `eval/resultados/<nome>.jsonl` e é possível limitar ou retomar rodadas:
+- **Dataset (`eval/dataset.json`)**: 40 exemplos em português (30 consultas de leitura em 12 categorias e 10 pedidos de escrita que devem ser bloqueados), divididos em `train` (25) e `dev` (15).
+- **Métricas**: *execution accuracy*, taxa de SQL válido, tentativas até um SQL válido, taxa de bloqueio correto e latência média. Na *execution accuracy*, o resultado gerado precisa conter o da referência: aliases e colunas a mais não importam, a ordem das linhas só conta quando a referência tem `ORDER BY` e linhas repetidas não contam quando ela tem `DISTINCT`.
+- **Execução**: precisa do `uvicorn` e do Local API Server do Jan ligados, como o bot. O schema e os SQLs passam pela rota `/query`. O cache do DSPy fica desligado durante a avaliação, para a latência ser real.
 
 ```bash
-python eval/avaliar.py --seco                                         # valida o dataset e os SQLs de referência (sem LLM)
-python eval/avaliar.py --split dev                                    # avalia o CoT + validação no conjunto dev
-python eval/avaliar.py --split dev --sem-validacao                    # avalia o CoT original (sem limpeza/validação)
-python eval/avaliar.py --split dev --limite 5 --nome teste-parcial    # avalia apenas os 5 primeiros exemplos
-python eval/avaliar.py --split dev --nome cot-validacao --retomar     # retoma de onde parou usando o .jsonl existente
+python eval/teste_dataset.py                  # confere o dataset e as referências (sem LLM e sem uvicorn)
+python eval/teste_metrica.py                  # testa a métrica (sem LLM e sem uvicorn)
+python bot.py --avaliar                       # CoT + validação no split dev
+python bot.py --avaliar --sem-validacao       # CoT original, sem limpeza, validação e checagem de SELECT
+python bot.py --avaliar --split train --limite 5
 ```
+
+O resumo sai no terminal e os detalhes por pergunta em `eval/resultados/<rodada>-<split>.json`. Os números da linha de base estão em [`eval/RESULTADOS.md`](eval/RESULTADOS.md).
+
+As datas do seed são relativas ao dia em que o banco foi criado, e as perguntas de validade usam `date('now')`. Por isso, **apague `database/mercado.db` e suba o servidor de novo antes de avaliar**: num banco antigo, os lotes "perto de vencer" já venceram e os números mudam de uma máquina para outra.
 
 ## Notas
 
@@ -122,4 +126,4 @@ python eval/avaliar.py --split dev --nome cot-validacao --retomar     # retoma d
 - **O terminal mostra o andamento de cada pergunta**, com horário em cada linha: pergunta recebida, tempo da transcrição, tempo e SQL de cada tentativa do modelo, erros de validação, consulta ao banco e uma linha final de resumo (`resumo origem=texto tentativas=1 llm_s=53.2 sql_s=0.004 linhas=1 total_s=53.3`). Com `LOG_LEVEL=DEBUG` sai também o raciocínio do modelo.
 - **A linha de resumo tem nível próprio** (`bot.metricas`), então ela aparece em qualquer `LOG_LEVEL`. Com `WARNING` ficam só ela e os avisos; com `ERROR`, só ela. É assim que se roda muitas perguntas de uma vez sem encher o terminal.
 - **O SQL gerado é validado antes de ir para o banco.** O bot monta um SQLite em memória com o mesmo schema e compila a consulta ali. Se o modelo errar, ele recebe o erro de volta e tenta de novo, até 3 vezes; depois disso o bot pede para reformular a pergunta. O terminal mostra o SQL e a tentativa de cada pergunta.
-- **Só consultas de leitura são aceitas.** O bot bloqueia qualquer tentativa de escrita ou alteração num SQLite em memória (`set_authorizer`) antes mesmo de falar com o servidor, e pedidos bloqueados interrompem o laço na hora sem gastar novas tentativas do modelo. Como segunda camada de proteção, o servidor aceita apenas consultas iniciadas por `SELECT` ou `WITH` e abre o banco em modo somente leitura (`mode=ro`). Além disso, se uma consulta vier com várias instruções separadas por ponto e vírgula, ela é cortada na primeira instrução.
+- **Só consultas de leitura são aceitas.** O bot compila a consulta num SQLite em memória com um autorizador (`set_authorizer`) que só libera leitura, então qualquer escrita ou alteração é bloqueada antes mesmo de falar com o servidor. Pedidos bloqueados interrompem o laço na hora, sem gastar novas tentativas do modelo. Se o modelo devolver várias instruções separadas por ponto e vírgula, o bot manda só a primeira para o servidor, e bloqueia o pedido inteiro se alguma das outras for escrita. Como segunda camada de proteção, o servidor aceita uma instrução por vez, iniciada por `SELECT` ou `WITH`, e abre o banco em modo somente leitura (`mode=ro`).

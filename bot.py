@@ -2,13 +2,17 @@
 # 1. CONFIGURAÇÃO
 # ======================================================================
 
+import argparse
 import dspy
+import itertools
+import json
 import logging
 import os
 import re
 import sqlite3
 import tempfile
 import time
+from collections import Counter
 import requests
 import telebot #pip install pytelegrambotapi
 import whisper #pip install -U openai-whisper
@@ -104,8 +108,12 @@ def obter_schema() -> dict:
     return _schema_cache
 
 
-def limpar_sql(sql: str) -> str:
-    """Deixa só a primeira instrução SQL, sem cerca de markdown e sem ponto e vírgula."""
+def separar_instrucoes(sql: str) -> list[str]:
+    """Separa a resposta do modelo em instruções SQL, sem cerca de markdown e sem ponto e vírgula.
+
+    A primeira instrução é a consulta que vai para o banco. As outras nunca são
+    enviadas, mas a validação confere se alguma delas é escrita.
+    """
     texto = sql.strip()
 
     # O modelo às vezes devolve o SQL dentro de ```sql ... ```
@@ -118,66 +126,68 @@ def limpar_sql(sql: str) -> str:
     # escreve esse marcador (ou uma variação dele) grudado no fim do SQL
     texto = texto.split("[[", 1)[0]
 
-    texto = texto.strip()
-
-    # complete_statement respeita texto entre aspas e comentários, então cortar
+    # complete_statement respeita texto entre aspas e comentários, então separar
     # aqui não quebra uma consulta que tenha ponto e vírgula dentro de um valor
+    instrucoes = []
     acumulado = ""
     for caractere in texto:
         acumulado += caractere
         if sqlite3.complete_statement(acumulado):
-            texto = acumulado
-            break
+            instrucoes.append(acumulado)
+            acumulado = ""
+    instrucoes.append(acumulado)
 
-    return texto.strip().rstrip(";").strip()
+    limpas = (instrucao.strip().rstrip(";").strip() for instrucao in instrucoes)
+    return [instrucao for instrucao in limpas if instrucao]
 
 
-ACOES_ESCRITA = {
-    sqlite3.SQLITE_INSERT,
-    sqlite3.SQLITE_UPDATE,
-    sqlite3.SQLITE_DELETE,
-    sqlite3.SQLITE_CREATE_INDEX,
-    sqlite3.SQLITE_CREATE_TABLE,
-    sqlite3.SQLITE_CREATE_TEMP_INDEX,
-    sqlite3.SQLITE_CREATE_TEMP_TABLE,
-    sqlite3.SQLITE_CREATE_TEMP_TRIGGER,
-    sqlite3.SQLITE_CREATE_TEMP_VIEW,
-    sqlite3.SQLITE_CREATE_TRIGGER,
-    sqlite3.SQLITE_CREATE_VIEW,
-    sqlite3.SQLITE_CREATE_VTABLE,
-    sqlite3.SQLITE_DROP_INDEX,
-    sqlite3.SQLITE_DROP_TABLE,
-    sqlite3.SQLITE_DROP_TEMP_INDEX,
-    sqlite3.SQLITE_DROP_TEMP_TABLE,
-    sqlite3.SQLITE_DROP_TEMP_TRIGGER,
-    sqlite3.SQLITE_DROP_TEMP_VIEW,
-    sqlite3.SQLITE_DROP_TRIGGER,
-    sqlite3.SQLITE_DROP_VIEW,
-    sqlite3.SQLITE_DROP_VTABLE,
-    sqlite3.SQLITE_ALTER_TABLE,
-    sqlite3.SQLITE_TRANSACTION,
-    sqlite3.SQLITE_ATTACH,
-    sqlite3.SQLITE_DETACH,
-    sqlite3.SQLITE_REINDEX,
-    sqlite3.SQLITE_ANALYZE,
-    sqlite3.SQLITE_PRAGMA,
+# Ações que uma consulta de leitura pede ao SQLite. O autorizador nega todas as
+# outras, então um comando que ninguém lembrou de listar também fica bloqueado.
+ACOES_LEITURA = {
+    sqlite3.SQLITE_SELECT,
+    sqlite3.SQLITE_READ,
+    sqlite3.SQLITE_FUNCTION,
+    sqlite3.SQLITE_RECURSIVE,
 }
 
-
-def bloquear_escrita(action, *args):
-    """Autorizador do SQLite que nega qualquer operação de escrita ou alteração."""
-    if action in ACOES_ESCRITA:
-        return sqlite3.SQLITE_DENY
-    return sqlite3.SQLITE_OK
+MENSAGEM_BLOQUEIO = "Bloqueado: Apenas consultas (SELECT) são permitidas."
 
 
-def validar_sql(sql: str, ddl_schema) -> None:
+def _compilar_so_leitura(conn, sql: str) -> None:
+    """Compila o SQL com EXPLAIN, liberando só as ações de leitura.
+
+    Levanta PermissionError quando o SQL não é leitura e sqlite3.Error quando
+    ele não compila.
+    """
+    acoes = []
+
+    def autorizar(acao, *args):
+        acoes.append(acao)
+        return sqlite3.SQLITE_OK if acao in ACOES_LEITURA else sqlite3.SQLITE_DENY
+
+    conn.set_authorizer(autorizar)
+    try:
+        conn.execute(f"EXPLAIN {sql}")
+    except sqlite3.DatabaseError as e:
+        if any(acao not in ACOES_LEITURA for acao in acoes):
+            raise PermissionError(MENSAGEM_BLOQUEIO) from e
+        raise
+
+    # Alguns comandos, como o VACUUM, nem passam pelo autorizador. Toda leitura
+    # passa por SQLITE_SELECT, então o que não passou não é consulta
+    if sqlite3.SQLITE_SELECT not in acoes:
+        raise PermissionError(MENSAGEM_BLOQUEIO)
+
+
+def validar_sql(sql: str, ddl_schema, extras=()) -> None:
     """Compila o SQL num SQLite em memória com o mesmo schema do banco real.
 
     O banco de verdade não é tocado: o EXPLAIN apenas prepara a consulta, o que
     já pega erro de sintaxe, tabela ou coluna inexistente e nome ambíguo.
-    O authorizer garante que apenas consultas de leitura (SELECT) passem.
-    Levanta PermissionError quando o SQL tenta escrita/alteração e sqlite3.Error
+    O autorizador garante que só consultas de leitura passem.
+    `extras` são as instruções que o modelo escreveu depois da primeira: elas
+    não vão para o banco, mas se alguma for escrita o pedido inteiro é bloqueado.
+    Levanta PermissionError quando há escrita ou alteração e sqlite3.Error
     quando o SQL não presta.
     """
     if not sql:
@@ -187,12 +197,16 @@ def validar_sql(sql: str, ddl_schema) -> None:
     try:
         for comando in ddl_schema:
             conn.execute(comando)
-        conn.set_authorizer(bloquear_escrita)
-        conn.execute(f"EXPLAIN {sql}")
-    except sqlite3.DatabaseError as e:
-        if "not authorized" in str(e).lower():
-            raise PermissionError("Bloqueado: Apenas consultas (SELECT) são permitidas.") from e
-        raise
+
+        # As extras vêm antes para que a escrita tenha prioridade sobre um erro
+        # na consulta. Extra que não compila é texto solto do modelo e é ignorada
+        for extra in extras:
+            try:
+                _compilar_so_leitura(conn, extra)
+            except sqlite3.Error:
+                pass
+
+        _compilar_so_leitura(conn, sql)
     finally:
         conn.close()
 
@@ -252,14 +266,20 @@ class ReliableSQLGenerator(dspy.Module):
                 erro_anterior="\n\n".join(erros),
             )
             duracao = time.perf_counter() - inicio
-            sql = limpar_sql(pred.sql_query)
+            instrucoes = separar_instrucoes(pred.sql_query)
+            sql = instrucoes[0] if instrucoes else ""
+            extras = instrucoes[1:]
             log.info("tentativa %d/%d respondeu em %.1fs: %s", tentativa, MAX_TENTATIVAS, duracao, sql)
+            if extras:
+                log.info("tentativa %d/%d trouxe instruções a mais, que não vão para o banco: %s",
+                         tentativa, MAX_TENTATIVAS, "; ".join(extras))
             log.debug("raciocínio do modelo: %s", getattr(pred, "reasoning", ""))
 
             try:
-                validar_sql(sql, ddl)
+                validar_sql(sql, ddl, extras)
             except PermissionError as e:
-                log.warning("tentativa %d/%d bloqueada: %s (SQL: %s)", tentativa, MAX_TENTATIVAS, e, sql)
+                log.warning("tentativa %d/%d bloqueada: %s (SQL: %s)",
+                            tentativa, MAX_TENTATIVAS, e, "; ".join(instrucoes))
                 return dspy.Prediction(
                     sql_query=None,
                     erro=str(e),
@@ -466,7 +486,7 @@ def whisper_transcribe(filepath: str) -> str:
 
 
 # ======================================================================
-# 7. HANDLERS DO TELEGRAM + MAIN
+# 7. HANDLERS DO TELEGRAM
 # ======================================================================
 
 bot = telebot.TeleBot(API_TOKEN)
@@ -517,10 +537,299 @@ def handle_voz(message):
             os.remove(caminho_temp)
 
 
-def main():
+# ======================================================================
+# 8. AVALIAÇÃO (ETAPA 5)
+# ======================================================================
+# `python bot.py --avaliar` roda o eval/dataset.json sem subir o Telegram.
+# Precisa do server.py e do Jan ligados, igual ao bot: o schema e a execução
+# dos SQLs passam pela mesma rota /query que o usuário usa.
+
+PASTA_EVAL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eval")
+CAMINHO_DATASET = os.path.join(PASTA_EVAL, "dataset.json")
+PASTA_RESULTADOS = os.path.join(PASTA_EVAL, "resultados")
+
+
+class ErroNaConsulta(Exception):
+    """O servidor recusou ou não conseguiu executar o SQL."""
+
+
+def normalizar_linha(valores) -> tuple:
+    """Arredonda os floats para a comparação não depender de casas decimais."""
+    return tuple(round(valor, 2) if isinstance(valor, float) else valor for valor in valores)
+
+
+def executar_para_avaliar(sql: str) -> list[tuple]:
+    """Executa o SQL pela rota do servidor e devolve as linhas como tuplas, na ordem das colunas.
+
+    Levanta ErroNaConsulta quando o SQL não presta. Servidor desligado levanta
+    a exceção do requests, para a avaliação parar em vez de contar tudo como erro.
+    """
+    if not sql or not sql.strip():
+        raise ErroNaConsulta("SQL vazio")
+
+    resposta = requests.get(f"{SERVER_URL}/query", params={"sql": sql}, timeout=15)
+    if resposta.status_code == 400:
+        raise ErroNaConsulta(resposta.json().get("detail", resposta.text))
+    resposta.raise_for_status()
+    return [normalizar_linha(linha.values()) for linha in resposta.json()["resultado"]]
+
+
+def _iguais(a: list, b: list, modo: str) -> bool:
+    if modo == "ordem":
+        return a == b
+    if modo == "conjunto":
+        return set(a) == set(b)
+    return Counter(a) == Counter(b)
+
+
+def mesmo_resultado(linhas_pred: list[tuple], linhas_ref: list[tuple], sql_ref: str) -> bool:
+    """Confere se o resultado gerado contém o resultado da referência.
+
+    Nomes de coluna (aliases) não importam, e colunas a mais no SQL gerado são
+    aceitas: o que conta é existir, entre as colunas geradas, uma coluna com os
+    valores de cada coluna da referência. A ordem das linhas só importa quando a
+    referência tem ORDER BY, e linhas repetidas não contam quando ela tem DISTINCT.
+    """
+    if re.search(r"\bORDER\s+BY\b", sql_ref, flags=re.IGNORECASE):
+        modo = "ordem"
+    elif re.search(r"\bSELECT\s+DISTINCT\b", sql_ref, flags=re.IGNORECASE):
+        modo = "conjunto"
+    else:
+        modo = "contagem"
+
+    if not linhas_ref or not linhas_pred:
+        return not linhas_ref and not linhas_pred
+
+    n_ref = len(linhas_ref[0])
+    n_pred = len(linhas_pred[0])
+
+    def coluna(linhas, i):
+        return [linha[i] for linha in linhas]
+
+    # Para cada coluna da referência, as colunas geradas com os mesmos valores.
+    # Isso corta as combinações antes de comparar as linhas inteiras
+    candidatas = [
+        [i for i in range(n_pred) if _iguais(coluna(linhas_pred, i), coluna(linhas_ref, j), modo)]
+        for j in range(n_ref)
+    ]
+
+    for colunas in itertools.product(*candidatas):
+        if len(set(colunas)) < n_ref:
+            continue
+        projetadas = [tuple(linha[i] for i in colunas) for linha in linhas_pred]
+        if _iguais(projetadas, linhas_ref, modo):
+            return True
+    return False
+
+
+def metrica_execucao(example, pred, trace=None, pred_name=None, pred_trace=None) -> float:
+    """Execution accuracy: 1.0 se acertou, 0.0 se errou.
+
+    Pedido de escrita acerta quando o gerador bloqueia. Consulta de leitura
+    acerta quando o resultado gerado contém o da referência (mesmo_resultado).
+    Aceita os cinco argumentos que o dspy.GEPA exige (etapa 6).
+    """
+    erro = getattr(pred, "erro", None)
+    if example.tipo == "bloqueado":
+        return 1.0 if erro else 0.0
+
+    sql = getattr(pred, "sql_query", None)
+    if erro or not sql:
+        return 0.0
+
+    try:
+        linhas_pred = executar_para_avaliar(sql)
+    except ErroNaConsulta:
+        return 0.0
+
+    # A referência foi conferida pelo eval/teste_dataset.py. Se ela falhar aqui,
+    # o problema é do dataset, então a exceção não é engolida
+    linhas_ref = executar_para_avaliar(example.sql_referencia)
+    return 1.0 if mesmo_resultado(linhas_pred, linhas_ref, example.sql_referencia) else 0.0
+
+
+def carregar_dataset() -> tuple[list, list]:
+    """Lê o eval/dataset.json e devolve (trainset, devset) como dspy.Example."""
+    schema = obter_schema()
+    with open(CAMINHO_DATASET, encoding="utf-8") as arquivo:
+        itens = json.load(arquivo)
+
+    conjuntos = {"train": [], "dev": []}
+    for item in itens:
+        exemplo = dspy.Example(
+            id=item["id"],
+            dbschema=schema["descricao"],
+            question=item["pergunta"],
+            ddl=schema["ddl"],
+            sql_referencia=item.get("sql_referencia"),
+            tipo=item["tipo"],
+            categoria=item["categoria"],
+        ).with_inputs("dbschema", "question", "ddl")
+        conjuntos[item["split"]].append(exemplo)
+
+    return conjuntos["train"], conjuntos["dev"]
+
+
+class GeradorAvaliado(dspy.Module):
+    """Envolve o gerador para o dspy.Evaluate: mede o tempo e devolve SQL inválido como predição."""
+
+    def __init__(self, validar: bool = True):
+        super().__init__()
+        self.gerador = generator
+        self.validar = validar
+
+    def forward(self, dbschema, question, ddl=()):
+        inicio = time.perf_counter()
+        try:
+            pred = self.gerador(dbschema=dbschema, question=question, ddl=ddl, validar=self.validar)
+        except ConsultaInvalida as e:
+            return dspy.Prediction(
+                sql_query=None,
+                erro=None,
+                tentativas=e.tentativas,
+                status="sql_invalido",
+                latencia_s=time.perf_counter() - inicio,
+            )
+
+        erro = getattr(pred, "erro", None)
+        return dspy.Prediction(
+            sql_query=pred.sql_query,
+            erro=erro,
+            tentativas=pred.tentativas,
+            status="bloqueado" if erro else "ok",
+            latencia_s=time.perf_counter() - inicio,
+        )
+
+
+def _media(valores: list) -> float | None:
+    return sum(valores) / len(valores) if valores else None
+
+
+def _resumir(resultados, nome: str, split: str, validar: bool) -> dict:
+    registros = []
+    for exemplo, pred, nota in resultados:
+        # Predição vazia é exemplo em que o dspy.Evaluate pegou uma exceção (Jan fora do ar, por exemplo)
+        status = getattr(pred, "status", None) or "erro_modelo"
+        sql = getattr(pred, "sql_query", None)
+
+        sql_valido = False
+        if exemplo.tipo == "leitura" and status == "ok":
+            try:
+                executar_para_avaliar(sql)
+                sql_valido = True
+            except ErroNaConsulta:
+                pass
+
+        latencia = getattr(pred, "latencia_s", None)
+        registros.append({
+            "id": exemplo.id,
+            "tipo": exemplo.tipo,
+            "categoria": exemplo.categoria,
+            "pergunta": exemplo.question,
+            "sql_referencia": exemplo.sql_referencia,
+            "sql_gerado": sql,
+            "status": status,
+            "tentativas": getattr(pred, "tentativas", None),
+            "sql_valido": sql_valido,
+            "acertou": nota,
+            "latencia_s": round(latencia, 2) if latencia is not None else None,
+        })
+
+    leituras = [r for r in registros if r["tipo"] == "leitura"]
+    bloqueados = [r for r in registros if r["tipo"] == "bloqueado"]
+
+    def arredondar(valor, casas=4):
+        return round(valor, casas) if valor is not None else None
+
+    return {
+        "nome": nome,
+        "split": split,
+        "validacao_ativa": validar,
+        "exemplos": len(registros),
+        "leituras": len(leituras),
+        "bloqueados": len(bloqueados),
+        "execution_accuracy": arredondar(_media([r["acertou"] for r in leituras])),
+        "taxa_sql_valido": arredondar(_media([r["sql_valido"] for r in leituras])),
+        # Como na 5.1: tentativas até chegar num SQL válido, só nas leituras que chegaram
+        "tentativas_ate_valido": arredondar(_media([r["tentativas"] for r in leituras if r["sql_valido"]]), 2),
+        "taxa_bloqueio_correto": arredondar(_media([r["acertou"] for r in bloqueados])),
+        "latencia_media_s": arredondar(_media([r["latencia_s"] for r in registros if r["latencia_s"] is not None]), 2),
+        "registros": registros,
+    }
+
+
+def _porcentagem(valor) -> str:
+    return f"{valor * 100:.1f}%" if valor is not None else "n/a"
+
+
+def avaliar(split: str = "dev", validar: bool = True, limite: int | None = None) -> int:
+    """Roda o dspy.Evaluate no split escolhido, imprime o resumo e salva em eval/resultados/."""
+    # Sem cache: com ele, uma pergunta já feita volta na hora, o que estraga a
+    # latência, e a primeira tentativa com validação reaproveitaria a resposta
+    # da rodada sem validação, porque o prompt é o mesmo
+    dspy.configure_cache(enable_disk_cache=False, enable_memory_cache=False)
+
+    trainset, devset = carregar_dataset()
+    exemplos = {"dev": devset, "train": trainset, "todos": trainset + devset}[split]
+    if limite is not None:
+        exemplos = exemplos[:limite]
+
+    nome = "cot-validacao" if validar else "cot-original"
+    log.info("avaliação %s: %d exemplo(s) do split %s", nome, len(exemplos), split)
+
+    avaliador = dspy.Evaluate(
+        devset=exemplos,
+        metric=metrica_execucao,
+        num_threads=1,  # o Jan atende uma pergunta por vez; em paralelo, a latência sairia errada
+        display_progress=True,
+    )
+    resultado = avaliador(GeradorAvaliado(validar=validar))
+    resumo = _resumir(resultado.results, nome, split, validar)
+
+    print(f"\n{'id':<5}{'categoria':<18}{'status':<14}{'tent.':>6}{'tempo':>8}  acertou")
+    for r in resumo["registros"]:
+        tempo = f"{r['latencia_s']:.1f}s" if r["latencia_s"] is not None else "n/a"
+        print(f"{r['id']:<5}{r['categoria']:<18}{r['status']:<14}{str(r['tentativas']):>6}{tempo:>8}  {r['acertou']:.0f}")
+
+    print(f"\n=== {nome} (split {split}, {resumo['exemplos']} exemplos) ===")
+    print(f"Execution accuracy       : {_porcentagem(resumo['execution_accuracy'])}")
+    print(f"SQL válido               : {_porcentagem(resumo['taxa_sql_valido'])}")
+    print(f"Tentativas até SQL válido: {resumo['tentativas_ate_valido']}")
+    print(f"Bloqueio correto         : {_porcentagem(resumo['taxa_bloqueio_correto'])}")
+    print(f"Latência média           : {resumo['latencia_media_s']}s")
+
+    os.makedirs(PASTA_RESULTADOS, exist_ok=True)
+    sufixo = f"-limite{limite}" if limite is not None else ""
+    caminho = os.path.join(PASTA_RESULTADOS, f"{nome}-{split}{sufixo}.json")
+    with open(caminho, "w", encoding="utf-8") as arquivo:
+        json.dump(resumo, arquivo, ensure_ascii=False, indent=2)
+    print(f"Detalhes em {caminho}")
+    return 0
+
+
+# ======================================================================
+# 9. MAIN
+# ======================================================================
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Bot de Text-to-SQL no Telegram")
+    parser.add_argument("--avaliar", action="store_true",
+                        help="roda o eval/dataset.json (etapa 5) em vez de subir o bot")
+    parser.add_argument("--split", choices=("dev", "train", "todos"), default="dev",
+                        help="com --avaliar: conjunto de exemplos (padrão: dev)")
+    parser.add_argument("--sem-validacao", action="store_true",
+                        help="com --avaliar: mede o CoT original, sem limpeza, validação e checagem de SELECT")
+    parser.add_argument("--limite", type=int,
+                        help="com --avaliar: usa só os N primeiros exemplos do split")
+    args = parser.parse_args()
+
+    if args.avaliar:
+        return avaliar(args.split, validar=not args.sem_validacao, limite=args.limite)
+
     log.info("bot iniciado, consultando o backend em %s", SERVER_URL)
     bot.polling()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

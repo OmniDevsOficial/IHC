@@ -4,4 +4,4 @@ database
 .env
 __pycache__
 docs
-eval/resultados/*.jsonl
+eval/resultados/

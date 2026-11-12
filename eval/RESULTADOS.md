@@ -1,34 +1,46 @@
-# Resultados da Avaliação (Etapa 5)
+# Resultados da avaliação (Etapa 5)
 
-Rodada ainda não executada.
+Linha de base medida em 12-11-2026 no split `dev` (15 exemplos: 12 leituras e 3 pedidos de escrita), com o modelo `gemma-4-E2B-it-IQ4_XS` no Jan.
 
-| Configuração | Exec. accuracy | SQL válido | Tentativas (média) | Bloqueio correto | Latência (s) | Exemplos |
+| Configuração | Exec. accuracy | SQL válido | Tentativas até SQL válido | Bloqueio correto | Latência média (s) | Exemplos |
 |---|---|---|---|---|---|---|
-| CoT original (`--sem-validacao`) | Rodada ainda não executada | Rodada ainda não executada | Rodada ainda não executada | Rodada ainda não executada | Rodada ainda não executada | Rodada ainda não executada |
-| CoT + validação | Rodada ainda não executada | Rodada ainda não executada | Rodada ainda não executada | Rodada ainda não executada | Rodada ainda não executada | Rodada ainda não executada |
-| GEPA (etapa 6) | Rodada ainda não executada | Rodada ainda não executada | Rodada ainda não executada | Rodada ainda não executada | Rodada ainda não executada | Rodada ainda não executada |
-| RLM (etapa 7, futuro) | Rodada ainda não executada | Rodada ainda não executada | Rodada ainda não executada | Rodada ainda não executada | Rodada ainda não executada | Rodada ainda não executada |
+| CoT original (`--sem-validacao`) | 83,3% (10/12) | 91,7% (11/12) | 1,0 | 0% (0/3) | 3,06 | 15 |
+| CoT + validação | 91,7% (11/12) | 100% (12/12) | 1,0 | 100% (3/3) | 2,99 | 15 |
+| GEPA (etapa 6) | | | | | | |
+| RLM (etapa 7, futuro) | | | | | | |
+
+**Máquina das rodadas:** PC com GPU dedicada de 16 GB de VRAM, Ryzen 7 e 32 GB de RAM, com o Jan rodando o modelo na GPU. Para comparação, no notebook de desenvolvimento do grupo (Ryzen 7 3700U, sem GPU dedicada) o mesmo modelo levou cerca de 50 s por pergunta, num teste com 2 perguntas.
+
+## Conclusões
+
+- **Limpeza (etapa 3):** ganhou a q05, que veio com o SQL certo mas com o marcador `[[ completed ]]` do DSPy no fim. O laço de novas tentativas não chegou a ser usado.
+- **Bloqueio (etapa 4):** é o maior ganho. Sem ele, o gerador deixou passar `DELETE` e `UPDATE`; com ele, os três pedidos foram barrados.
+- **Custo:** a validação não acrescenta tempo.
+- **Erro que sobrou:** a q26 ("qual o preço do feijão?") busca `nome = 'feijão'` em vez de usar `LIKE`. É o primeiro alvo do GEPA.
+
+## Cuidados ao ler os números
+
+- **Poucos exemplos:** o split `dev` tem só 12 leituras, então cada pergunta vale cerca de 8 pontos, e a diferença entre as configurações é de uma pergunta só.
+- **Uma rodada só:** a temperatura do modelo não é fixada, então rodar de novo pode mudar uma ou outra resposta.
+- **Bloqueio no CoT original:** é 0% por definição, porque o gerador não tinha checagem.
+- **Latência:** depende da máquina; só vale comparar rodadas no mesmo computador.
 
 ## Como reproduzir
 
-1. Ative o ambiente virtual do projeto (`.\venv\Scripts\Activate.ps1` ou `source ./venv/Scripts/activate`).
-2. Confira a integridade do dataset e dos SQLs de referência (não requer o Jan ligado):
-   ```bash
-   python eval/avaliar.py --seco
-   ```
-3. Ligue o **Local API Server** no Jan com o modelo configurado no `.env` (não é necessário subir o `uvicorn`, pois o avaliador acessa o banco diretamente em modo somente leitura).
-4. Execute a avaliação do CoT original (`--sem-validacao`) e do CoT com validação (`validar=True`):
-   ```bash
-   python eval/avaliar.py --split dev --sem-validacao --nome cot-original
-   python eval/avaliar.py --split dev --nome cot-validacao
-   ```
-5. Caso uma rodada seja interrompida, continue do ponto em que parou adicionando `--retomar`:
-   ```bash
-   python eval/avaliar.py --split dev --nome cot-validacao --retomar
-   ```
-6. Os resultados agregados ficam salvos em `eval/resultados/<nome>.resumo.json` e o detalhamento pergunta a pergunta em `eval/resultados/<nome>.jsonl`.
+1. Ative o `venv` e confira o `.env` (o `LLM_MODEL` precisa bater com o `id` do modelo no Jan).
+2. Apague `database/mercado.db` e suba o servidor (`uvicorn server:app`), que recria o banco com as datas de hoje.
+3. Confira o dataset e a métrica (não precisam do Jan nem do `uvicorn`):
 
-## Limitações
+   ```bash
+   python eval/teste_dataset.py
+   python eval/teste_metrica.py
+   ```
 
-- **Latência do modelo local**: em máquinas rodando em CPU (ou GPUs de entrada), cada chamada ao LLM local pode levar vários minutos — especialmente nas perguntas que exigem até 3 tentativas na configuração com validação.
-- **Rodadas parciais (`--limite`)**: caso o tempo total inviabilize rodar todo o conjunto de uma vez, pode-se usar `--limite N`. Para uma comparação justa na tabela acima, as rodadas de **CoT original (`--sem-validacao`)** e **CoT + validação** devem obrigatoriamente usar o **MESMO `--split`** e o **MESMO `--limite`**.
+4. Com o `uvicorn` e o Local API Server do Jan ligados, rode as duas configurações, uma depois da outra, no mesmo split:
+
+   ```bash
+   python bot.py --avaliar --sem-validacao
+   python bot.py --avaliar
+   ```
+
+5. O resumo sai no terminal e os detalhes por pergunta ficam em `eval/resultados/<rodada>-<split>.json` (fora do git).
