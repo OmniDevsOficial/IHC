@@ -895,9 +895,13 @@ def carregar_otimizado() -> None:
     log.info("gerador otimizado carregado de %s", CAMINHO_OTIMIZADO)
 
 
-def otimizar(modelo_reflexao: str | None = None, auto: str = "light",
+CHAMADAS_PADRAO = 100  # teto padrão de chamadas à métrica no GEPA
+
+
+def otimizar(modelo_reflexao: str | None = None, auto: str | None = None,
              limite_chamadas: int | None = None, limite: int | None = None) -> int:
     """Roda o dspy.GEPA no train, compara com a linha de base no dev e salva o programa."""
+    auto_explicito = auto is not None and limite_chamadas is None
     # Cache ligado: o GEPA repete avaliações iguais e o cache poupa chamadas ao Jan
     trainset, devset = carregar_dataset()
     if limite is not None:
@@ -909,7 +913,7 @@ def otimizar(modelo_reflexao: str | None = None, auto: str = "light",
     base_reflexao = os.getenv("REFLECTION_API_BASE", LLM_API_BASE if nome_reflexao == LLM_MODEL else None)
     chave_reflexao = os.getenv("REFLECTION_API_KEY", "not-needed")
     lm_reflexao = dspy.LM(nome_reflexao, api_base=base_reflexao, api_key=chave_reflexao,
-                          temperature=1.0, max_tokens=16000)
+                          temperature=1.0, max_tokens=4000)
     log.info("GEPA: gerador %s, reflexão %s, %d exemplo(s) no train", LLM_MODEL, nome_reflexao, len(trainset))
 
     # Durante a otimização o gerador roda com a validação ligada, igual ao bot
@@ -919,7 +923,20 @@ def otimizar(modelo_reflexao: str | None = None, auto: str = "light",
     avaliador = dspy.Evaluate(devset=devset, metric=metrica_execucao, num_threads=1, display_progress=True)
     base = avaliador(programa)
 
-    argumentos = {"auto": auto} if limite_chamadas is None else {"max_metric_calls": limite_chamadas}
+    # O bloqueio é feito pelo validador, não pelo prompt. Se os pedidos de escrita
+    # entrassem no GEPA, a métrica premiaria o modelo por escrever DELETE e ALTER.
+    # Eles ficam só na avaliação (dev completo, antes e depois).
+    treino_gepa = [e for e in trainset if e.tipo == "leitura"]
+    valida_gepa = [e for e in devset if e.tipo == "leitura"]
+    log.info("GEPA: %d leitura(s) no treino e %d na validação (pedidos de escrita ficam de fora)",
+             len(treino_gepa), len(valida_gepa))
+
+    # Teto de chamadas à métrica para a rodada caber em ~1 hora. O auto="light"
+    # faz centenas e, num modelo lento, passa de 3 horas. --auto libera a busca maior.
+    if auto_explicito:
+        argumentos = {"auto": auto}
+    else:
+        argumentos = {"max_metric_calls": limite_chamadas or CHAMADAS_PADRAO}
     otimizador = dspy.GEPA(
         metric=metrica_gepa,
         reflection_lm=lm_reflexao,
@@ -930,7 +947,7 @@ def otimizar(modelo_reflexao: str | None = None, auto: str = "light",
         **argumentos,
     )
     # O valset é o próprio dev: sem um teste separado, o ganho no dev está otimista
-    otimizado = otimizador.compile(programa, trainset=trainset, valset=devset)
+    otimizado = otimizador.compile(programa, trainset=treino_gepa, valset=valida_gepa)
 
     final = avaliador(otimizado)
     print(f"\nDev antes : {base.score:.1f}%")
@@ -961,14 +978,14 @@ def main() -> int:
                         help="com --avaliar: usa só os N primeiros exemplos do split")
     parser.add_argument("--otimizar", action="store_true",
                         help="roda o GEPA (etapa 6) no train e salva o gerador em eval/otimizado/")
-    parser.add_argument("--auto", choices=("light", "medium", "heavy"), default="light",
-                        help="com --otimizar: tamanho da busca do GEPA (padrão: light)")
+    parser.add_argument("--auto", choices=("light", "medium", "heavy"),
+                        help="com --otimizar: busca do GEPA por tamanho (light faz centenas de chamadas)")
     parser.add_argument("--max-chamadas", type=int,
-                        help="com --otimizar: teto de chamadas à métrica (substitui --auto)")
+                        help=f"com --otimizar: teto de chamadas à métrica (padrão: {CHAMADAS_PADRAO})")
     parser.add_argument("--otimizado", action="store_true",
                         help="com --avaliar: usa o gerador salvo em eval/otimizado/")
     args = parser.parse_args()
-    
+
     if args.otimizar:
         return otimizar(auto=args.auto, limite_chamadas=args.max_chamadas, limite=args.limite)
 

@@ -268,5 +268,19 @@
       1.0,
       1.0
     ]
+  },
+  {
+    "i": 16,
+    "selected_program_candidate": 2,
+    "subsample_ids": [
+      17,
+      15,
+      10
+    ],
+    "subsample_scores": [
+      1.0,
+      1.0,
+      1.0
+    ]
   }
 ]
