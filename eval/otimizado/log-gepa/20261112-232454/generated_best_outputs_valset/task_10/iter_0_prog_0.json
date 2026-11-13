@@ -1,0 +1,7 @@
+{
+    "sql_query": "SELECT\n  T1.nome,\n  COUNT(T2.id) AS total_produtos\nFROM categorias AS T1\nINNER JOIN produtos AS T2\n  ON T1.id = T2.categoria_id\nGROUP BY\n  T1.nome",
+    "erro": null,
+    "tentativas": 1,
+    "status": "ok",
+    "latencia_s": 0.009270100003050175
+}

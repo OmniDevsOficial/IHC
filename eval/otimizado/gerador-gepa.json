@@ -32,7 +32,7 @@
   },
   "metadata": {
     "dependency_versions": {
-      "python": "3.13",
+      "python": "3.14",
       "dspy": "3.3.0",
       "cloudpickle": "3.1"
     }

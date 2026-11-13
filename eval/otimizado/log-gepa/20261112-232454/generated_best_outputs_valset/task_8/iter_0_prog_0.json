@@ -1,0 +1,7 @@
+{
+    "sql_query": "SELECT SUM(T2.quantidade)\nFROM produtos AS T1\nINNER JOIN movimentacoes AS T2\n  ON T1.id = T2.produto_id\nWHERE\n  T1.nome = 'Sabonete' AND T2.tipo = 'saida'",
+    "erro": null,
+    "tentativas": 1,
+    "status": "ok",
+    "latencia_s": 0.007469200005289167
+}

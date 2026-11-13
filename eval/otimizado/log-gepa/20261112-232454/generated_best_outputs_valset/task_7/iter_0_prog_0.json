@@ -1,0 +1,7 @@
+{
+    "sql_query": "SELECT T1.nome\nFROM produtos AS T1\nINNER JOIN fornecedores AS T2\n  ON T1.fornecedor_id = T2.id\nWHERE\n  T2.nome = 'Distribuidora Sul'",
+    "erro": null,
+    "tentativas": 1,
+    "status": "ok",
+    "latencia_s": 0.0072142999997595325
+}

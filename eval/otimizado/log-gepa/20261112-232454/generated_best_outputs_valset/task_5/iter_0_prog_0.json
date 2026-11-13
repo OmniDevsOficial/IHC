@@ -1,0 +1,7 @@
+{
+    "sql_query": "SELECT\n  T1.nome\nFROM produtos AS T1\nJOIN lotes AS T2\n  ON T1.id = T2.produto_id\nGROUP BY\n  T1.id\nHAVING\n  SUM(T2.quantidade) < T1.estoque_minimo",
+    "erro": null,
+    "tentativas": 1,
+    "status": "ok",
+    "latencia_s": 0.007610599997860845
+}
