@@ -113,6 +113,16 @@ O resumo sai no terminal e os detalhes por pergunta em `eval/resultados/<rodada>
 
 As datas do seed são relativas ao dia em que o banco foi criado, e as perguntas de validade usam `date('now')`. Por isso, **apague `database/mercado.db` e suba o servidor de novo antes de avaliar**: num banco antigo, os lotes "perto de vencer" já venceram e os números mudam de uma máquina para outra.
 
+## Otimização (GEPA, etapa 6)
+
+```bash
+python bot.py --otimizar --limite 3 --max-chamadas 30   # teste rápido, só para ver se roda
+python bot.py --otimizar                                # GEPA completo (--auto light|medium|heavy)
+python bot.py --avaliar --otimizado                     # mede o gerador salvo em eval/otimizado/
+```
+
+O GEPA otimiza a instrução do gerador no `train` e confere no `dev`. A nota vem da mesma `metrica_execucao`, mas o GEPA usa `metrica_gepa`, que devolve também um texto dizendo o que errou (SQL gerado, SQL esperado, erro do banco). O prompt novo só passa a valer no bot depois de `carregar_otimizado()`.
+
 ## Notas
 
 - **O servidor de IA precisa estar ativo.** Com o Local API Server do Jan desligado, toda pergunta falha.

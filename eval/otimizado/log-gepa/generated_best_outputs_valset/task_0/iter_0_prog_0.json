@@ -1,0 +1,7 @@
+{
+    "sql_query": "SELECT preco_venda FROM produtos WHERE nome = 'sabonete'",
+    "erro": null,
+    "tentativas": 1,
+    "status": "ok",
+    "latencia_s": 0.010324599999876227
+}
