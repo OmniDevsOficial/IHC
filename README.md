@@ -123,7 +123,7 @@ python bot.py --avaliar --otimizado                     # mede o gerador salvo e
 
 Cada rodada grava o log numa pasta própria, `eval/otimizado/log-gepa/<data-hora>/`, porque o GEPA retoma o estado de uma pasta que já existe. O teste com `--limite` salva o gerador em `gerador-gepa-limite<N>.json` e não sobrescreve o `gerador-gepa.json`. O `--avaliar` e o `--otimizar` rodam o gerador com temperatura 0, para as rodadas serem repetíveis.
 
-O GEPA otimiza a instrução do gerador no `train` e confere no `dev`. A nota vem da mesma `metrica_execucao`, mas o GEPA usa `metrica_gepa`, que devolve também um texto dizendo o que errou (SQL gerado, SQL esperado, erro do banco). O bot no Telegram carrega o `eval/otimizado/gerador-gepa.json` sozinho quando ele existe e, sem o arquivo, segue com o prompt original. O `--avaliar` só usa o otimizado com `--otimizado`, e aí grava o resultado como `gepa-<split>.json`, sem sobrescrever a linha de base.
+O GEPA otimiza a instrução do gerador no `train` e confere no `dev`. A nota vem da mesma `metrica_execucao`, mas o GEPA usa `metrica_gepa`, que devolve também um texto dizendo o que errou (SQL gerado, SQL esperado, erro do banco). O bot no Telegram carrega o `eval/otimizado/gerador-gepa.json` sozinho quando ele existe e, sem o arquivo, segue com o prompt original. O arquivo guarda também o prompt de partida (`prompt_base`): se a `TextToSQL` mudar depois da rodada, o bot ignora o arquivo e avisa no log, e é preciso rodar o `--otimizar` de novo. O `--avaliar` só usa o otimizado com `--otimizado`, e aí grava o resultado como `gepa-<split>.json`, sem sobrescrever a linha de base.
 
 ## Notas
 

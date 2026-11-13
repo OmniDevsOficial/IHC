@@ -234,6 +234,10 @@ class TextToSQL(dspy.Signature):
     Use only the tables and columns described in dbschema.
     For calculated columns (SUM, COUNT, AVG, etc.), always give a readable alias
     in Portuguese snake_case, e.g. SUM(estoque * preco) AS total_em_reais.
+    To filter by the name of a product, category or supplier, never use =:
+    the stored names differ in capitalization and carry extra words, such as
+    the package size. Use LIKE with only the main words of the name, in lower
+    case, e.g. nome LIKE '%termo%'.
     When erro_anterior is not empty, it contains the queries you already tried
     and the errors they raised: write a different query that fixes them, never
     the same one again.
@@ -834,6 +838,7 @@ def avaliar(split: str = "dev", validar: bool = True, limite: int | None = None,
 
 PASTA_OTIMIZADO = os.path.join(PASTA_EVAL, "otimizado")
 CAMINHO_OTIMIZADO = os.path.join(PASTA_OTIMIZADO, "gerador-gepa.json")
+CHAVE_PROMPT_BASE = "prompt_base"  # instrução da TextToSQL de onde o GEPA partiu
 
 
 def _recortar(linhas: list, limite: int = 5) -> str:
@@ -892,14 +897,24 @@ def _explicar_erro(example, pred) -> str:
 def carregar_otimizado(obrigatorio: bool = False) -> bool:
     """Troca o prompt do gerador pelo que o GEPA salvou.
 
-    Sem o arquivo, segue com o prompt original e devolve False. Com
-    obrigatorio=True (o --avaliar --otimizado), encerra o programa, porque
+    Sem o arquivo, ou com um arquivo otimizado a partir de outra versão da
+    TextToSQL, segue com o prompt original e devolve False. Sem essa conferência,
+    uma regra nova escrita na TextToSQL seria trocada pelo prompt antigo salvo.
+    Com obrigatorio=True (o --avaliar --otimizado), encerra o programa, porque
     medir o original no lugar do otimizado daria um resultado enganoso.
     """
+    motivo = None
     if not os.path.exists(CAMINHO_OTIMIZADO):
+        motivo = f"não achei {CAMINHO_OTIMIZADO}"
+    else:
+        with open(CAMINHO_OTIMIZADO, encoding="utf-8") as arquivo:
+            if json.load(arquivo).get(CHAVE_PROMPT_BASE) != TextToSQL.instructions:
+                motivo = f"{CAMINHO_OTIMIZADO} foi otimizado a partir de outra versão da TextToSQL"
+
+    if motivo:
         if obrigatorio:
-            raise SystemExit(f"Não achei {CAMINHO_OTIMIZADO}. Rode `python bot.py --otimizar` primeiro.")
-        log.info("sem %s, o gerador segue com o prompt original", CAMINHO_OTIMIZADO)
+            raise SystemExit(f"{motivo[0].upper() + motivo[1:]}. Rode `python bot.py --otimizar` de novo.")
+        log.info("%s, o gerador segue com o prompt original", motivo)
         return False
     generator.load(CAMINHO_OTIMIZADO)
     log.info("gerador otimizado carregado de %s", CAMINHO_OTIMIZADO)
@@ -978,6 +993,13 @@ def otimizar(modelo_reflexao: str | None = None, auto: str | None = None,
     caminho = CAMINHO_OTIMIZADO if limite is None else os.path.join(PASTA_OTIMIZADO, f"gerador-gepa{sufixo}.json")
     # Salva só o gerador (sem o invólucro da avaliação), que é o que o bot carrega
     otimizado.gerador.save(caminho)
+    # Guarda junto o prompt de partida, para o carregar_otimizado perceber
+    # quando a TextToSQL mudou depois desta rodada. O dspy ignora a chave a mais
+    with open(caminho, encoding="utf-8") as arquivo:
+        salvo = json.load(arquivo)
+    salvo[CHAVE_PROMPT_BASE] = TextToSQL.instructions
+    with open(caminho, "w", encoding="utf-8") as arquivo:
+        json.dump(salvo, arquivo, ensure_ascii=False, indent=2)
     for nome, predictor in otimizado.named_predictors():
         print(f"\n--- instrução otimizada ({nome}) ---\n{predictor.signature.instructions}")
     print(f"\nPrograma salvo em {caminho}")

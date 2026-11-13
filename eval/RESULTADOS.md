@@ -51,6 +51,11 @@ Os três empataram, todos errando a q26. Com empate, o GEPA fica com o primeiro,
   - o modelo de reflexão é o próprio Gemma de 2B parâmetros, e o GEPA depende de um refletor mais forte que o gerador para tirar uma regra geral dos erros.
 - **Erro que sobrou:** a q26 ("qual o preço do feijão?") busca `nome = 'feijão'`, mas o produto se chama "Feijão 1kg".
 
+**Regra do `LIKE` (13-11-2026, a medir):** como o GEPA não chegou à regra, ela foi escrita à mão na instrução da `TextToSQL`: para filtrar por nome de produto, categoria ou fornecedor, usar `LIKE '%termo%'` em minúsculas, nunca `=`. O mesmo erro aparecia fora do dataset, em "Esponja de Aço" (no banco, "Esponja de aço") e em "farinha de trigo" (no banco, "Farinha de trigo 1kg"). Os números das tabelas acima são do prompt anterior, e a regra ainda precisa de uma rodada do `--avaliar` no PC de 16 GB. Duas observações:
+
+- o `gerador-gepa.json` atual foi otimizado a partir do prompt anterior, então o bot passa a ignorá-lo;
+- o `LIKE` do SQLite só ignora maiúsculas em letras sem acento: "Aço" × "aço" casa, mas "FEIJÃO" × "feijão" não.
+
 **Próximos passos para o GEPA:** usar um modelo de reflexão maior (no Jan, cabe um modelo de 12 a 14B junto com o Gemma na GPU de 16 GB, ou um modelo por API), ampliar a busca (`--auto light`) e acrescentar ao dataset mais perguntas do tipo da q26, para haver o que otimizar.
 
 ## Cuidados ao ler os números
