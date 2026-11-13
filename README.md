@@ -113,6 +113,18 @@ O resumo sai no terminal e os detalhes por pergunta em `eval/resultados/<rodada>
 
 As datas do seed são relativas ao dia em que o banco foi criado, e as perguntas de validade usam `date('now')`. Por isso, **apague `database/mercado.db` e suba o servidor de novo antes de avaliar**: num banco antigo, os lotes "perto de vencer" já venceram e os números mudam de uma máquina para outra.
 
+## Otimização (GEPA, etapa 6)
+
+```bash
+python bot.py --otimizar --limite 3 --max-chamadas 30   # teste rápido, só para ver se roda
+python bot.py --otimizar                                # GEPA completo (--auto light|medium|heavy)
+python bot.py --avaliar --otimizado                     # mede o gerador salvo em eval/otimizado/
+```
+
+Cada rodada grava o log numa pasta própria, `eval/otimizado/log-gepa/<data-hora>/`, porque o GEPA retoma o estado de uma pasta que já existe. O teste com `--limite` salva o gerador em `gerador-gepa-limite<N>.json` e não sobrescreve o `gerador-gepa.json`. O `--avaliar` e o `--otimizar` rodam o gerador com temperatura 0, para as rodadas serem repetíveis.
+
+O GEPA otimiza a instrução do gerador no `train` e confere no `dev`. A nota vem da mesma `metrica_execucao`, mas o GEPA usa `metrica_gepa`, que devolve também um texto dizendo o que errou (SQL gerado, SQL esperado, erro do banco). O bot no Telegram carrega o `eval/otimizado/gerador-gepa.json` sozinho quando ele existe e, sem o arquivo, segue com o prompt original. O arquivo guarda também o prompt de partida (`prompt_base`): se a `TextToSQL` mudar depois da rodada, o bot ignora o arquivo e avisa no log, e é preciso rodar o `--otimizar` de novo. O `--avaliar` só usa o otimizado com `--otimizado`, e aí grava o resultado como `gepa-<split>.json`, sem sobrescrever a linha de base.
+
 ## Notas
 
 - **O servidor de IA precisa estar ativo.** Com o Local API Server do Jan desligado, toda pergunta falha.

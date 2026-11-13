@@ -1,0 +1,7 @@
+{
+    "sql_query": "SELECT preco_venda FROM produtos WHERE nome = 'feij\u00e3o'",
+    "erro": null,
+    "tentativas": 1,
+    "status": "ok",
+    "latencia_s": 0.007464900001650676
+}

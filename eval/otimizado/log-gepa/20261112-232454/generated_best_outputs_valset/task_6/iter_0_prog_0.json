@@ -1,0 +1,7 @@
+{
+    "sql_query": "SELECT T1.nome FROM produtos AS T1 INNER JOIN categorias AS T2 ON T1.categoria_id = T2.id WHERE T2.nome = 'Bebidas'",
+    "erro": null,
+    "tentativas": 1,
+    "status": "ok",
+    "latencia_s": 0.007302000005438458
+}

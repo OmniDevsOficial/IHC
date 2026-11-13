@@ -1,0 +1,7 @@
+{
+    "sql_query": "SELECT DISTINCT T1.nome\nFROM produtos AS T1\nINNER JOIN lotes AS T2\n  ON T1.id = T2.produto_id\nWHERE\n  T2.data_validade BETWEEN date('now') AND date('now', '+7 days')",
+    "erro": null,
+    "tentativas": 1,
+    "status": "ok",
+    "latencia_s": 0.007793099997797981
+}

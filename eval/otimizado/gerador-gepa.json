@@ -1,0 +1,40 @@
+{
+  "generate_sql.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Generate a SQLite query from a natural language question (in Portuguese).\nUse only the tables and columns described in dbschema.\nFor calculated columns (SUM, COUNT, AVG, etc.), always give a readable alias\nin Portuguese snake_case, e.g. SUM(estoque * preco) AS total_em_reais.\nWhen erro_anterior is not empty, it contains the queries you already tried\nand the errors they raised: write a different query that fixes them, never\nthe same one again.\nReturn only the SQL query, without comments.",
+      "fields": [
+        {
+          "prefix": "Dbschema:",
+          "description": "Databases schema"
+        },
+        {
+          "prefix": "Question:",
+          "description": "Natural language question"
+        },
+        {
+          "prefix": "Erro Anterior:",
+          "description": "Queries already tried and their errors, empty on the first attempt"
+        },
+        {
+          "prefix": "Reasoning:",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Sql Query:",
+          "description": "Valid SQL query"
+        }
+      ]
+    },
+    "lm": null
+  },
+  "metadata": {
+    "dependency_versions": {
+      "python": "3.14",
+      "dspy": "3.3.0",
+      "cloudpickle": "3.1"
+    }
+  }
+}
