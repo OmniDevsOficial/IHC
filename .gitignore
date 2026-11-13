@@ -5,3 +5,6 @@ database
 __pycache__
 docs
 eval/resultados/
+eval/otimizado/log-gepa/*/gepa_state.bin
+eval/otimizado/gerador-gepa-limite*.json
+eval/otimizado/log-gepa/*-limite*/

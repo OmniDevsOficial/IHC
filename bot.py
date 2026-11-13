@@ -219,6 +219,16 @@ lm = dspy.LM(LLM_MODEL, api_base=LLM_API_BASE, api_key='not-needed')
 dspy.configure(lm=lm)
 
 
+def usar_temperatura_zero() -> None:
+    """Tira o sorteio do gerador, para a avaliação e o GEPA serem repetíveis.
+
+    Sem isso, rodar de novo pode mudar uma resposta, e a diferença entre as
+    configurações é de uma pergunta só (pendência 5.4). O bot no Telegram
+    continua com a temperatura padrão do modelo.
+    """
+    dspy.configure(lm=lm.copy(temperature=0.0))
+
+
 class TextToSQL(dspy.Signature):
     """Generate a SQLite query from a natural language question (in Portuguese).
     Use only the tables and columns described in dbschema.
@@ -762,21 +772,27 @@ def _porcentagem(valor) -> str:
     return f"{valor * 100:.1f}%" if valor is not None else "n/a"
 
 
-def avaliar(split: str = "dev", validar: bool = True, limite: int | None = None) -> int:
+def avaliar(split: str = "dev", validar: bool = True, limite: int | None = None,
+            otimizado: bool = False) -> int:
     """Roda o dspy.Evaluate no split escolhido, imprime o resumo e salva em eval/resultados/."""
     # Sem cache: com ele, uma pergunta já feita volta na hora, o que estraga a
     # latência, e a primeira tentativa com validação reaproveitaria a resposta
     # da rodada sem validação, porque o prompt é o mesmo
     dspy.configure_cache(enable_disk_cache=False, enable_memory_cache=False)
+    usar_temperatura_zero()
 
     trainset, devset = carregar_dataset()
     exemplos = {"dev": devset, "train": trainset, "todos": trainset + devset}[split]
     if limite is not None:
         exemplos = exemplos[:limite]
 
-    nome = "cot-validacao" if validar else "cot-original"
-    if generator.generate_sql.predict.signature.instructions != TextToSQL.instructions:
-        nome = "gepa"  # o prompt foi trocado por carregar_otimizado()
+    # O nome vem da flag, não do prompt: quando o GEPA fica com o prompt
+    # original, comparar as instruções rotularia a rodada como cot-validacao
+    # e o JSON sobrescreveria o da linha de base
+    if otimizado:
+        nome = "gepa" if validar else "gepa-sem-validacao"
+    else:
+        nome = "cot-validacao" if validar else "cot-original"
     log.info("avaliação %s: %d exemplo(s) do split %s", nome, len(exemplos), split)
 
     avaliador = dspy.Evaluate(
@@ -833,66 +849,61 @@ def metrica_gepa(example, pred, trace=None, pred_name=None, pred_trace=None):
     ele for (SQL gerado, SQL esperado, erro do banco), melhor a proposta.
     O texto só vai para o modelo de reflexão, nunca para o gerador.
     """
+    nota = metrica_execucao(example, pred)
+    if nota == 1.0:
+        return dspy.Prediction(score=nota, feedback="Resultado igual ao esperado.")
+    return dspy.Prediction(score=nota, feedback=_explicar_erro(example, pred))
+
+
+def _explicar_erro(example, pred) -> str:
+    """Diz por que a metrica_execucao deu 0, no texto que o modelo de reflexão lê."""
     erro = getattr(pred, "erro", None)
     sql = getattr(pred, "sql_query", None)
-    tentativas = getattr(pred, "tentativas", None)
 
+    # Os pedidos de escrita ficam fora do GEPA (veja otimizar). Se um entrar,
+    # o feedback não pode pedir ao gerador que escreva DELETE ou UPDATE
     if example.tipo == "bloqueado":
-        if erro:
-            return dspy.Prediction(score=1.0, feedback="Pedido de escrita bloqueado corretamente.")
-        return dspy.Prediction(
-            score=0.0,
-            feedback=(
-                f"O pedido '{example.question}' pede para alterar o banco e deveria ser bloqueado, "
-                f"mas o modelo devolveu o SQL: {sql}. O gerador nunca deve trocar um pedido de "
-                "escrita por um SELECT inofensivo; ele deve escrever o SQL de escrita pedido, "
-                "porque quem bloqueia é o validador."
-            ),
-        )
-
+        return "Pedido de escrita que não foi bloqueado. O bloqueio é do validador, não do prompt."
     if erro:
-        return dspy.Prediction(
-            score=0.0,
-            feedback=f"Consulta de leitura bloqueada indevidamente ({erro}). SQL: {sql}",
-        )
+        return f"Consulta de leitura bloqueada indevidamente ({erro}). SQL: {sql}"
     if not sql:
-        return dspy.Prediction(
-            score=0.0,
-            feedback=(
-                f"O modelo não chegou a um SQL válido em {tentativas} tentativa(s). "
-                "Use só as tabelas e colunas do schema e devolva só o SQL."
-            ),
+        return (
+            f"O modelo não chegou a um SQL válido em {getattr(pred, 'tentativas', None)} tentativa(s). "
+            "Use só as tabelas e colunas do schema e devolva só o SQL."
         )
 
     try:
         linhas_pred = executar_para_avaliar(sql)
     except ErroNaConsulta as e:
-        return dspy.Prediction(score=0.0, feedback=f"O SQL gerado falhou no banco: {e}. SQL: {sql}")
+        return f"O SQL gerado falhou no banco: {e}. SQL: {sql}"
 
     linhas_ref = executar_para_avaliar(example.sql_referencia)
-    if mesmo_resultado(linhas_pred, linhas_ref, example.sql_referencia):
-        return dspy.Prediction(score=1.0, feedback="Resultado igual ao esperado.")
-
-    return dspy.Prediction(
-        score=0.0,
-        feedback=(
-            f"Pergunta: {example.question}\n"
-            f"SQL gerado: {sql}\n"
-            f"Resultado gerado ({len(linhas_pred)} linha(s)): {_recortar(linhas_pred)}\n"
-            f"SQL esperado: {example.sql_referencia}\n"
-            f"Resultado esperado ({len(linhas_ref)} linha(s)): {_recortar(linhas_ref)}\n"
-            "Compare os dois SQLs e diga qual regra geral faltou no prompt (filtro, JOIN, "
-            "agregação, comparação de texto), sem copiar valores desta pergunta."
-        ),
+    return (
+        f"Pergunta: {example.question}\n"
+        f"SQL gerado: {sql}\n"
+        f"Resultado gerado ({len(linhas_pred)} linha(s)): {_recortar(linhas_pred)}\n"
+        f"SQL esperado: {example.sql_referencia}\n"
+        f"Resultado esperado ({len(linhas_ref)} linha(s)): {_recortar(linhas_ref)}\n"
+        "Compare os dois SQLs e diga qual regra geral faltou no prompt (filtro, JOIN, "
+        "agregação, comparação de texto), sem copiar valores desta pergunta."
     )
 
 
-def carregar_otimizado() -> None:
-    """Troca o prompt do gerador pelo que o GEPA salvou. Sem o arquivo, avisa e segue com o original."""
+def carregar_otimizado(obrigatorio: bool = False) -> bool:
+    """Troca o prompt do gerador pelo que o GEPA salvou.
+
+    Sem o arquivo, segue com o prompt original e devolve False. Com
+    obrigatorio=True (o --avaliar --otimizado), encerra o programa, porque
+    medir o original no lugar do otimizado daria um resultado enganoso.
+    """
     if not os.path.exists(CAMINHO_OTIMIZADO):
-        raise SystemExit(f"Não achei {CAMINHO_OTIMIZADO}. Rode `python bot.py --otimizar` primeiro.")
+        if obrigatorio:
+            raise SystemExit(f"Não achei {CAMINHO_OTIMIZADO}. Rode `python bot.py --otimizar` primeiro.")
+        log.info("sem %s, o gerador segue com o prompt original", CAMINHO_OTIMIZADO)
+        return False
     generator.load(CAMINHO_OTIMIZADO)
     log.info("gerador otimizado carregado de %s", CAMINHO_OTIMIZADO)
+    return True
 
 
 CHAMADAS_PADRAO = 100  # teto padrão de chamadas à métrica no GEPA
@@ -903,6 +914,7 @@ def otimizar(modelo_reflexao: str | None = None, auto: str | None = None,
     """Roda o dspy.GEPA no train, compara com a linha de base no dev e salva o programa."""
     auto_explicito = auto is not None and limite_chamadas is None
     # Cache ligado: o GEPA repete avaliações iguais e o cache poupa chamadas ao Jan
+    usar_temperatura_zero()
     trainset, devset = carregar_dataset()
     if limite is not None:
         trainset, devset = trainset[:limite], devset[:limite]
@@ -937,13 +949,21 @@ def otimizar(modelo_reflexao: str | None = None, auto: str | None = None,
         argumentos = {"auto": auto}
     else:
         argumentos = {"max_metric_calls": limite_chamadas or CHAMADAS_PADRAO}
+
+    # Uma pasta de log por rodada. Se a pasta já existe, o GEPA retoma o estado
+    # salvo nela em vez de começar do zero, e misturaria esta rodada com uma
+    # anterior feita com outro dataset (por exemplo, o teste com --limite)
+    sufixo = f"-limite{limite}" if limite is not None else ""
+    pasta_log = os.path.join(PASTA_OTIMIZADO, "log-gepa", time.strftime("%Y%m%d-%H%M%S") + sufixo)
+    log.info("GEPA: log da rodada em %s", pasta_log)
+
     otimizador = dspy.GEPA(
         metric=metrica_gepa,
         reflection_lm=lm_reflexao,
         num_threads=1,  # o Jan atende uma pergunta por vez
         seed=0,
         track_stats=True,
-        log_dir=os.path.join(PASTA_OTIMIZADO, "log-gepa"),
+        log_dir=pasta_log,
         **argumentos,
     )
     # O valset é o próprio dev: sem um teste separado, o ganho no dev está otimista
@@ -954,11 +974,13 @@ def otimizar(modelo_reflexao: str | None = None, auto: str | None = None,
     print(f"Dev depois: {final.score:.1f}%")
 
     os.makedirs(PASTA_OTIMIZADO, exist_ok=True)
+    # Um teste com --limite não sobrescreve o programa que o bot carrega
+    caminho = CAMINHO_OTIMIZADO if limite is None else os.path.join(PASTA_OTIMIZADO, f"gerador-gepa{sufixo}.json")
     # Salva só o gerador (sem o invólucro da avaliação), que é o que o bot carrega
-    otimizado.gerador.save(CAMINHO_OTIMIZADO)
+    otimizado.gerador.save(caminho)
     for nome, predictor in otimizado.named_predictors():
         print(f"\n--- instrução otimizada ({nome}) ---\n{predictor.signature.instructions}")
-    print(f"\nPrograma salvo em {CAMINHO_OTIMIZADO}")
+    print(f"\nPrograma salvo em {caminho}")
     return 0
 
 
@@ -983,18 +1005,22 @@ def main() -> int:
     parser.add_argument("--max-chamadas", type=int,
                         help=f"com --otimizar: teto de chamadas à métrica (padrão: {CHAMADAS_PADRAO})")
     parser.add_argument("--otimizado", action="store_true",
-                        help="com --avaliar: usa o gerador salvo em eval/otimizado/")
+                        help="com --avaliar: mede o gerador salvo em eval/otimizado/ "
+                             "(o bot no Telegram já usa esse arquivo quando ele existe)")
     args = parser.parse_args()
 
     if args.otimizar:
         return otimizar(auto=args.auto, limite_chamadas=args.max_chamadas, limite=args.limite)
 
-    if args.otimizado:
-        carregar_otimizado()
-
     if args.avaliar:
-        return avaliar(args.split, validar=not args.sem_validacao, limite=args.limite)
+        # Sem --otimizado, a avaliação mede o prompt original (linha de base)
+        if args.otimizado:
+            carregar_otimizado(obrigatorio=True)
+        return avaliar(args.split, validar=not args.sem_validacao, limite=args.limite,
+                       otimizado=args.otimizado)
 
+    # O bot usa o prompt do GEPA quando ele existe (etapa 6.3)
+    carregar_otimizado()
     log.info("bot iniciado, consultando o backend em %s", SERVER_URL)
     bot.polling()
     return 0
